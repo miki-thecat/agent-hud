@@ -27,6 +27,20 @@ Each visible session should expose only the useful minimum:
 
 The default presentation should prioritize sessions that need human attention, while staying visually compact.
 
+## CLI watcher
+
+The current core-data validation surface can run as a read-only event-driven
+watcher:
+
+```text
+cargo run -- --watch
+```
+
+It prints only bounded root/user session IDs and normalized recorded readiness.
+Rollout appends are parsed incrementally; persisted discovery/WAL changes cause
+a bounded reconciliation. The output is still a **Recent local sessions**
+view, not a claim about currently open Codex App chats.
+
 ## Product principles
 
 1. **Fast and lightweight first.** Startup latency, idle CPU, memory footprint, and event-to-paint latency are product requirements.
