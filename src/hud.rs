@@ -237,7 +237,7 @@ fn draw(chain: &mut SwapChain, state: &ApplicationState) -> windows_canvas::Resu
     );
     let row_format = TextFormat::new("Segoe UI", 15.0)?;
     let status_format = TextFormat::new_bold("Segoe UI", 12.0)?;
-    let status_left = (width - 136.0).max(200.0);
+    let status_left = (width - 136.0).clamp(0.0, (width - 112.0).max(0.0));
     if state.observation_degraded {
         draw_status_badge(
             &session,
@@ -249,7 +249,7 @@ fn draw(chain: &mut SwapChain, state: &ApplicationState) -> windows_canvas::Resu
         );
     }
     for (index, item) in state.sessions().iter().enumerate() {
-        let top = 92.0 + index as f32 * 34.0;
+        let top = 92.0 + index as f32 * 30.0;
         let label = item
             .title
             .as_deref()
@@ -274,7 +274,7 @@ fn draw(chain: &mut SwapChain, state: &ApplicationState) -> windows_canvas::Resu
             status_left,
             top + 4.0,
         );
-        if top + 34.0 > height {
+        if top + 30.0 > height {
             break;
         }
     }
