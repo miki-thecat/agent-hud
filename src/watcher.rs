@@ -13,11 +13,15 @@ use crate::{
     discovery::{self, SessionSnapshot},
     model::SessionChange,
     readiness::{LifecycleKind, Readiness},
+    verification::{VerificationEvidence, parse_command_execution},
 };
 
 #[derive(Debug, Eq, PartialEq)]
 pub enum RolloutUpdate {
     Readiness(Readiness),
+    Result(String),
+    Verification(VerificationEvidence),
+    ChangedFiles,
     NoChange,
     Reconcile,
 }
@@ -33,6 +37,9 @@ pub struct IncrementalRollout {
     active_turn: Option<String>,
     readiness: Readiness,
     last_lifecycle_timestamp: Option<String>,
+    latest_result: Option<String>,
+    changed_files: Vec<String>,
+    verification: Option<VerificationEvidence>,
 }
 
 impl IncrementalRollout {
@@ -45,6 +52,9 @@ impl IncrementalRollout {
             active_turn: None,
             readiness: Readiness::Unknown,
             last_lifecycle_timestamp: None,
+            latest_result: None,
+            changed_files: Vec::new(),
+            verification: None,
         };
         reader.read_from_start()?;
         Ok(reader)
@@ -54,8 +64,8 @@ impl IncrementalRollout {
         self.readiness
     }
 
-    fn last_lifecycle_timestamp(&self) -> Option<&str> {
-        self.last_lifecycle_timestamp.as_deref()
+    pub fn changed_files(&self) -> &[String] {
+        &self.changed_files
     }
 
     fn fail_closed(&mut self) {
@@ -66,15 +76,30 @@ impl IncrementalRollout {
 
     pub fn apply_append(&mut self) -> io::Result<RolloutUpdate> {
         let previous = self.readiness;
+        let previous_result = self.latest_result.clone();
+        let previous_verification = self.verification.clone();
+        let previous_files = self.changed_files.clone();
         let length = std::fs::metadata(&self.path)?.len();
         if length < self.offset {
             return Ok(RolloutUpdate::Reconcile);
         }
         self.read_new_bytes()?;
-        if self.readiness == previous {
-            Ok(RolloutUpdate::NoChange)
-        } else {
+        if self.readiness != previous {
             Ok(RolloutUpdate::Readiness(self.readiness))
+        } else if self.latest_result != previous_result {
+            Ok(self
+                .latest_result
+                .clone()
+                .map_or(RolloutUpdate::NoChange, RolloutUpdate::Result))
+        } else if self.changed_files != previous_files {
+            Ok(RolloutUpdate::ChangedFiles)
+        } else if self.verification != previous_verification {
+            Ok(self
+                .verification
+                .clone()
+                .map_or(RolloutUpdate::NoChange, RolloutUpdate::Verification))
+        } else {
+            Ok(RolloutUpdate::NoChange)
         }
     }
 
@@ -83,6 +108,9 @@ impl IncrementalRollout {
         self.partial.clear();
         self.active_turn = None;
         self.readiness = Readiness::Unknown;
+        self.latest_result = None;
+        self.changed_files.clear();
+        self.verification = None;
         self.read_new_bytes()
     }
 
@@ -115,6 +143,14 @@ impl IncrementalRollout {
             discovery::validate_metadata(record, &self.expected_id)
                 .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
             return Ok(());
+        }
+        let file_paths = discovery::file_change_paths(record);
+        discovery::append_changed_files(&mut self.changed_files, file_paths);
+        if let Some(evidence) = parse_command_execution(record) {
+            self.verification = Some(evidence);
+        }
+        if let Some(result) = discovery::assistant_result(record) {
+            self.latest_result = Some(result);
         }
         let Some((kind, turn_id, timestamp)) = discovery::lifecycle_record(record)
             .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?
@@ -230,7 +266,20 @@ impl LiveWatcher {
                 match session.rollout.apply_append()? {
                     RolloutUpdate::Readiness(readiness) => {
                         session.snapshot.readiness = readiness;
-                        let _ = session.rollout.last_lifecycle_timestamp();
+                        session.snapshot.latest_result = session.rollout.latest_result.clone();
+                        output.push(SessionChange::Updated((&session.snapshot).into()));
+                    }
+                    RolloutUpdate::Result(result) => {
+                        session.snapshot.latest_result = Some(result);
+                        session.snapshot.changed_files = session.rollout.changed_files().to_vec();
+                        output.push(SessionChange::Updated((&session.snapshot).into()));
+                    }
+                    RolloutUpdate::Verification(verification) => {
+                        session.snapshot.verification = Some(verification);
+                        output.push(SessionChange::Updated((&session.snapshot).into()));
+                    }
+                    RolloutUpdate::ChangedFiles => {
+                        session.snapshot.changed_files = session.rollout.changed_files().to_vec();
                         output.push(SessionChange::Updated((&session.snapshot).into()));
                     }
                     RolloutUpdate::Reconcile => return self.reconcile(),
@@ -283,9 +332,16 @@ impl LiveWatcher {
             let id = snapshot.id.clone();
             if let Some(mut existing) = self.tracked.remove(&id) {
                 let previous = existing.rollout.readiness();
+                let previous_result = existing.rollout.latest_result.clone();
+                let previous_files = existing.rollout.changed_files().to_vec();
+                let previous_verification = existing.rollout.verification.clone();
                 let rollout = IncrementalRollout::open(snapshot.rollout_path.clone(), id.clone())
                     .map_err(io::Error::other)?;
-                if previous != rollout.readiness() {
+                if previous != rollout.readiness()
+                    || previous_result != rollout.latest_result
+                    || previous_files != rollout.changed_files()
+                    || previous_verification != rollout.verification
+                {
                     output.push(SessionChange::Updated((&snapshot).into()));
                 }
                 existing.snapshot = snapshot;

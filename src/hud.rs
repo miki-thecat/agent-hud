@@ -268,7 +268,17 @@ fn draw(chain: &mut SwapChain, state: &ApplicationState) -> windows_canvas::Resu
             .as_deref()
             .filter(|title| !title.is_empty())
             .unwrap_or("(untitled)");
-        let title: String = title
+        let verification_suffix = item
+            .verification
+            .as_ref()
+            .map(|evidence| format!(" · verify {}", evidence.outcome.as_str()))
+            .unwrap_or_default();
+        let files_suffix = if item.readiness == Readiness::Ready && !item.changed_files.is_empty() {
+            format!(" · files: {}", item.changed_files.join(", "))
+        } else {
+            String::new()
+        };
+        let title: String = format!("{title}{verification_suffix}{files_suffix}")
             .chars()
             .map(|c| if c.is_control() { ' ' } else { c })
             .take(64)
@@ -424,10 +434,13 @@ mod tests {
         SessionViewModel {
             id: id.into(),
             title: None,
+            latest_result: None,
             project_label: None,
+            changed_files: Vec::new(),
             readiness: Readiness::Ready,
             needs_attention: false,
             recency_at_ms,
+            verification: None,
         }
     }
 

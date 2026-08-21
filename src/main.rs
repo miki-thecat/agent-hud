@@ -1,6 +1,7 @@
 mod discovery;
 mod model;
 mod readiness;
+mod verification;
 mod watcher;
 
 #[cfg(windows)]
@@ -81,12 +82,17 @@ fn snapshot_cli(database_path: PathBuf) -> ExitCode {
     for session in snapshots {
         let lifecycle = session.lifecycle_timestamp.as_deref().unwrap_or("-");
         println!(
-            "{}\t{}\t{}\trecency={}\tlifecycle={}",
+            "{}\t{}\t{}\trecency={}\tlifecycle={}\tverification={}",
             session.id,
             session.readiness.as_str(),
             display_label(session.title.as_deref()),
             session.recency_at_ms,
-            lifecycle
+            lifecycle,
+            session
+                .verification
+                .as_ref()
+                .map(|evidence| format!("{} ({})", evidence.outcome.as_str(), evidence.command))
+                .unwrap_or_else(|| "-".to_owned())
         );
     }
     ExitCode::SUCCESS
@@ -144,11 +150,21 @@ fn print_change(change: SessionChange) {
     match change {
         SessionChange::Snapshot(sessions) => {
             for session in sessions {
-                println!("INITIAL {} {}", session.id, session.readiness.as_str());
+                println!(
+                    "INITIAL {} {}{}",
+                    session.id,
+                    session.readiness.as_str(),
+                    session_metadata_label(&session)
+                );
             }
         }
         SessionChange::Updated(session) => {
-            println!("CHANGE {} {}", session.id, session.readiness.as_str());
+            println!(
+                "CHANGE {} {}{}",
+                session.id,
+                session.readiness.as_str(),
+                session_metadata_label(&session)
+            );
         }
         SessionChange::Removed(id) => println!("CHANGE {id} REMOVED"),
         SessionChange::ObservationDegraded { id } => println!("CHANGE {id} UNKNOWN"),
@@ -156,4 +172,19 @@ fn print_change(change: SessionChange) {
             eprintln!("agent-hud: observation terminated; readiness is UNKNOWN");
         }
     }
+}
+
+fn session_metadata_label(session: &model::SessionViewModel) -> String {
+    let mut label = String::new();
+    if session.readiness == readiness::Readiness::Ready && !session.changed_files.is_empty() {
+        label.push_str(&format!(" files={}", session.changed_files.join(",")));
+    }
+    if let Some(evidence) = &session.verification {
+        label.push_str(&format!(
+            " verification={} ({})",
+            evidence.outcome.as_str(),
+            evidence.command
+        ));
+    }
+    label
 }

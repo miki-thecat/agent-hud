@@ -1,3 +1,4 @@
+use crate::verification::VerificationEvidence;
 use crate::{discovery::SessionSnapshot, readiness::Readiness};
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -6,8 +7,11 @@ pub struct SessionViewModel {
     pub title: Option<String>,
     pub project_label: Option<String>,
     pub readiness: Readiness,
+    pub latest_result: Option<String>,
     pub needs_attention: bool,
     pub recency_at_ms: i64,
+    pub changed_files: Vec<String>,
+    pub verification: Option<VerificationEvidence>,
 }
 
 impl From<&SessionSnapshot> for SessionViewModel {
@@ -17,8 +21,11 @@ impl From<&SessionSnapshot> for SessionViewModel {
             title: snapshot.title.clone(),
             project_label: snapshot.project_label.clone(),
             readiness: snapshot.readiness,
+            latest_result: snapshot.latest_result.clone(),
             needs_attention: false,
             recency_at_ms: snapshot.recency_at_ms,
+            changed_files: snapshot.changed_files.clone(),
+            verification: snapshot.verification.clone(),
         }
     }
 }
@@ -148,10 +155,13 @@ mod tests {
         SessionViewModel {
             id: id.into(),
             title: None,
+            latest_result: None,
             project_label: None,
+            changed_files: Vec::new(),
             readiness,
             needs_attention: false,
             recency_at_ms,
+            verification: None,
         }
     }
 
@@ -181,9 +191,12 @@ mod tests {
             cwd: Some(r"C:\Users\kanat\dev\agent-hud".into()),
             project_label: Some("agent-hud".into()),
             readiness: Readiness::Ready,
+            latest_result: Some("completed result".into()),
             recency_at_ms: 1,
             lifecycle_timestamp: None,
+            changed_files: Vec::new(),
             rollout_path: PathBuf::from("rollout.jsonl"),
+            verification: None,
         };
         let mut state = ApplicationState::default();
         state.apply(SessionChange::Snapshot(vec![(&snapshot).into()]));
@@ -191,6 +204,7 @@ mod tests {
         let session = &state.sessions()[0];
         assert_eq!(session.project_label.as_deref(), Some("agent-hud"));
         assert_eq!(session.readiness, Readiness::Ready);
+        assert_eq!(session.latest_result.as_deref(), Some("completed result"));
         assert!(!session.needs_attention);
     }
 
