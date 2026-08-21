@@ -15,6 +15,7 @@ use windows_window::*;
 
 use crate::{
     model::{ApplicationState, SessionChange},
+    readiness::Readiness,
     watcher::LiveWatcher,
 };
 
@@ -207,6 +208,10 @@ fn draw(chain: &mut SwapChain, state: &ApplicationState) -> windows_canvas::Resu
     let session = chain.begin_draw()?;
     session.clear(ColorF::from_rgb8(248, 249, 251));
     let brush = session.create_solid_brush(ColorF::from_rgb8(30, 35, 42))?;
+    let status_brush = session.create_solid_brush(ColorF::from_rgb8(30, 35, 42))?;
+    if state.observation_degraded {
+        status_brush.set_color(ColorF::from_rgb8(126, 77, 0));
+    }
     let header = TextFormat::new_bold("Segoe UI", 22.0)?;
     let title = if state.observation_degraded {
         "Observation unavailable"
@@ -217,7 +222,11 @@ fn draw(chain: &mut SwapChain, state: &ApplicationState) -> windows_canvas::Resu
         title,
         &header,
         &Rect::new(24.0, 18.0, width - 24.0, 52.0),
-        &brush,
+        if state.observation_degraded {
+            &status_brush
+        } else {
+            &brush
+        },
     );
     let subhead = TextFormat::new("Segoe UI", 12.0)?;
     session.draw_text(
@@ -227,8 +236,20 @@ fn draw(chain: &mut SwapChain, state: &ApplicationState) -> windows_canvas::Resu
         &brush,
     );
     let row_format = TextFormat::new("Segoe UI", 15.0)?;
+    let status_format = TextFormat::new_bold("Segoe UI", 12.0)?;
+    let status_left = (width - 136.0).max(200.0);
+    if state.observation_degraded {
+        draw_status_badge(
+            &session,
+            &status_format,
+            &status_brush,
+            Readiness::Unknown,
+            status_left,
+            20.0,
+        );
+    }
     for (index, item) in state.sessions().iter().enumerate() {
-        let top = 92.0 + index as f32 * 30.0;
+        let top = 92.0 + index as f32 * 34.0;
         let label = item
             .title
             .as_deref()
@@ -239,17 +260,60 @@ fn draw(chain: &mut SwapChain, state: &ApplicationState) -> windows_canvas::Resu
             .map(|c| if c.is_control() { ' ' } else { c })
             .take(64)
             .collect();
-        let text = format!("{label}    {}", item.readiness.as_str());
         session.draw_text(
-            &text,
+            &label,
             &row_format,
-            &Rect::new(28.0, top, width - 24.0, top + 26.0),
+            &Rect::new(28.0, top, status_left - 16.0, top + 28.0),
             &brush,
         );
-        if top + 30.0 > height {
+        draw_status_badge(
+            &session,
+            &status_format,
+            &status_brush,
+            item.readiness,
+            status_left,
+            top + 4.0,
+        );
+        if top + 34.0 > height {
             break;
         }
     }
     drop(session);
     chain.present()
+}
+
+fn draw_status_badge(
+    session: &DrawingSession<'_>,
+    format: &TextFormat,
+    brush: &Brush,
+    readiness: Readiness,
+    left: f32,
+    top: f32,
+) {
+    let (background, foreground) = match readiness {
+        Readiness::Working => (
+            ColorF::from_rgb8(219, 234, 254),
+            ColorF::from_rgb8(18, 73, 140),
+        ),
+        Readiness::Ready => (
+            ColorF::from_rgb8(220, 244, 228),
+            ColorF::from_rgb8(24, 105, 54),
+        ),
+        Readiness::Unknown => (
+            ColorF::from_rgb8(255, 237, 196),
+            ColorF::from_rgb8(126, 77, 0),
+        ),
+    };
+    brush.set_color(background);
+    session.fill_rounded_rect(
+        &RoundedRect::uniform(Rect::new(left, top, left + 112.0, top + 24.0), 7.0),
+        brush,
+    );
+    brush.set_color(foreground);
+    session.draw_text(
+        readiness.as_str(),
+        format,
+        &Rect::new(left + 10.0, top + 3.0, left + 106.0, top + 22.0),
+        brush,
+    );
 }
