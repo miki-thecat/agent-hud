@@ -1,0 +1,10 @@
+[package]
+name = "agent-hud"
+version = "0.1.0"
+edition = "2024"
+description = "Read-only recorded readiness snapshot for recent local Codex sessions"
+license = "MIT OR Apache-2.0"
+
+[dependencies]
+rusqlite = { version = "0.37", features = ["bundled"] }
+serde_json = "1.0"
