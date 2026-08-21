@@ -98,6 +98,10 @@ See:
 - `docs/references.md`
 - `templates/task-contract.md`
 
+Validation evidence:
+
+- `docs/research/issue-16-readiness-validation.md`
+
 ## Engineering source
 
 The repository workflow is adapted from `miki-thecat/software-engineering-blueprint`, using branch `docs/blueprint-v1.0-rc1` as the current convergence baseline. Only the subset relevant to this product is promoted here; the full blueprint is intentionally not copied into every task context.
