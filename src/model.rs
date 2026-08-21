@@ -68,6 +68,7 @@ impl ApplicationState {
                     .find(|existing| existing.id == item.id)
                 {
                     let was_working = existing.readiness == Readiness::Working;
+                    let was_attention = existing.needs_attention;
                     *existing = item;
                     existing.needs_attention =
                         if was_working && existing.readiness == Readiness::Ready {
@@ -75,7 +76,7 @@ impl ApplicationState {
                         } else if existing.readiness != Readiness::Ready {
                             false
                         } else {
-                            existing.needs_attention
+                            was_attention
                         };
                 } else {
                     self.sessions.push(item);
@@ -258,6 +259,24 @@ mod tests {
         assert!(state.sessions()[0].needs_attention);
         assert!(state.acknowledge("a"));
         assert_eq!(state.sessions()[0].readiness, Readiness::Ready);
+        assert!(!state.sessions()[0].needs_attention);
+    }
+
+    #[test]
+    fn unacknowledged_attention_survives_ready_to_ready_update() {
+        let mut state = ApplicationState::default();
+        state.apply(SessionChange::Snapshot(vec![session(
+            "a",
+            Readiness::Working,
+            1,
+        )]));
+        state.apply(SessionChange::Updated(session("a", Readiness::Ready, 1)));
+        assert!(state.sessions()[0].needs_attention);
+
+        state.apply(SessionChange::Updated(session("a", Readiness::Ready, 2)));
+
+        assert!(state.sessions()[0].needs_attention);
+        assert!(state.acknowledge("a"));
         assert!(!state.sessions()[0].needs_attention);
     }
 

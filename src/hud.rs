@@ -40,8 +40,8 @@ fn run_window(database_path: PathBuf) -> windows_canvas::Result<()> {
                 dpi_for_message.set((wparam & 0xffff) as f32);
             }
             if message == WM_LBUTTONUP {
-                let y = ((lparam >> 16) & 0xffff) as i16 as f32;
-                let _ = click_tx.send(y);
+                let client_y_px = ((lparam >> 16) & 0xffff) as i16 as f32;
+                let _ = click_tx.send(client_y_px);
                 post_wake(hwnd as usize);
             }
             None
@@ -115,7 +115,7 @@ fn run_window(database_path: PathBuf) -> windows_canvas::Result<()> {
             dirty |= state.apply(change);
         }
         while let Ok(y) = click_rx.try_recv() {
-            if let Some(item) = session_at_y(&state, y) {
+            if let Some(item) = session_at_client_y(&state, y, requested_dpi.get()) {
                 dirty |= state.acknowledge(&item);
             }
         }
@@ -316,8 +316,8 @@ fn draw_status_badge(
                 ColorF::from_rgb8(18, 73, 140),
             ),
             Readiness::Ready => (
-                ColorF::from_rgb8(220, 244, 228),
-                ColorF::from_rgb8(24, 105, 54),
+                ColorF::from_rgb8(219, 234, 254),
+                ColorF::from_rgb8(18, 73, 140),
             ),
             Readiness::Unknown => (
                 ColorF::from_rgb8(255, 237, 196),
@@ -339,6 +339,14 @@ fn draw_status_badge(
     );
 }
 
+fn session_at_client_y(state: &ApplicationState, client_y_px: f32, dpi: f32) -> Option<String> {
+    session_at_y(state, client_y_px_to_dips(client_y_px, dpi))
+}
+
+fn client_y_px_to_dips(client_y_px: f32, dpi: f32) -> f32 {
+    client_y_px * 96.0 / dpi.max(1.0)
+}
+
 fn session_at_y(state: &ApplicationState, y: f32) -> Option<String> {
     state
         .sessions()
@@ -349,4 +357,54 @@ fn session_at_y(state: &ApplicationState, y: f32) -> Option<String> {
             y >= top && y < top + 30.0
         })
         .map(|(_, item)| item.id.clone())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{client_y_px_to_dips, session_at_client_y};
+    use crate::{
+        model::{ApplicationState, SessionChange, SessionViewModel},
+        readiness::Readiness,
+    };
+
+    fn session(id: &str, recency_at_ms: i64) -> SessionViewModel {
+        SessionViewModel {
+            id: id.into(),
+            title: None,
+            readiness: Readiness::Ready,
+            needs_attention: false,
+            recency_at_ms,
+        }
+    }
+
+    fn two_rows() -> ApplicationState {
+        let mut state = ApplicationState::default();
+        state.apply(SessionChange::Snapshot(vec![
+            session("first", 2),
+            session("second", 1),
+        ]));
+        state
+    }
+
+    #[test]
+    fn hit_testing_uses_dips_at_96_dpi() {
+        let state = two_rows();
+
+        assert_eq!(client_y_px_to_dips(122.0, 96.0), 122.0);
+        assert_eq!(
+            session_at_client_y(&state, 122.0, 96.0).as_deref(),
+            Some("second")
+        );
+    }
+
+    #[test]
+    fn hit_testing_uses_dips_at_144_dpi() {
+        let state = two_rows();
+
+        assert_eq!(client_y_px_to_dips(183.0, 144.0), 122.0);
+        assert_eq!(
+            session_at_client_y(&state, 183.0, 144.0).as_deref(),
+            Some("second")
+        );
+    }
 }
