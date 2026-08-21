@@ -1,11 +1,17 @@
-use std::{path::PathBuf, sync::mpsc, thread};
+use std::{
+    cell::Cell,
+    path::PathBuf,
+    rc::Rc,
+    sync::mpsc::{self, Sender},
+    thread,
+};
 
 use windows_canvas::*;
-use windows_sys::Win32::UI::WindowsAndMessaging::{PostMessageW, WM_APP};
+use windows_sys::Win32::UI::WindowsAndMessaging::{PostMessageW, WM_APP, WM_DPICHANGED};
 use windows_window::*;
 
 use crate::{
-    model::{SessionChange, SessionViewModel},
+    model::{ApplicationState, SessionChange},
     watcher::LiveWatcher,
 };
 
@@ -20,8 +26,16 @@ pub fn run(database_path: PathBuf) -> std::process::ExitCode {
 }
 
 fn run_window(database_path: PathBuf) -> windows_canvas::Result<()> {
+    let requested_dpi = Rc::new(Cell::new(96.0_f32));
+    let dpi_for_message = Rc::clone(&requested_dpi);
     let window = Window::new("agent-hud — Recent local sessions")
         .size(620, 720)
+        .on_message(move |_hwnd, message, wparam, _lparam| {
+            if message == WM_DPICHANGED {
+                dpi_for_message.set((wparam & 0xffff) as f32);
+            }
+            None
+        })
         .create()?;
     let hwnd = window.hwnd() as usize;
     let (tx, rx) = mpsc::channel();
@@ -32,125 +46,187 @@ fn run_window(database_path: PathBuf) -> windows_canvas::Result<()> {
     thread::spawn(move || {
         let mut watcher = match LiveWatcher::new(database_path, sessions_dir) {
             Ok(watcher) => watcher,
-            Err(_) => return,
+            Err(_) => {
+                send_change(&tx, hwnd, SessionChange::ObservationTerminated);
+                return;
+            }
         };
         for change in watcher.initial_changes() {
             let _ = tx.send(change);
         }
+        post_wake(hwnd);
         let events = match watcher.watch() {
             Ok(events) => events,
-            Err(_) => return,
+            Err(_) => {
+                send_changes(&tx, hwnd, watcher.degrade());
+                return;
+            }
         };
         for event in events {
             let changes = match event {
-                Ok(event) => watcher
-                    .handle_event(&event)
-                    .unwrap_or_else(|_| watcher.recover()),
-                Err(_) => watcher.recover(),
+                Ok(event) => match watcher.handle_event(&event) {
+                    Ok(changes) => changes,
+                    Err(_) => {
+                        send_changes(&tx, hwnd, watcher.degrade());
+                        return;
+                    }
+                },
+                Err(_) => {
+                    send_changes(&tx, hwnd, watcher.degrade());
+                    return;
+                }
             };
-            for change in changes {
-                let _ = tx.send(change);
-            }
-            unsafe {
-                PostMessageW(hwnd as _, WATCHER_UPDATE, 0, 0);
-            }
+            send_changes(&tx, hwnd, changes);
         }
+        send_changes(&tx, hwnd, watcher.degrade());
     });
 
-    let device = GpuDevice::new_or_warp()?;
     let (width, height) = window.client_size();
-    let mut chain = device.create_swap_chain_for_window(&window, width as u32, height as u32)?;
-    let mut sessions = Vec::<SessionViewModel>::new();
+    let mut device = GpuDevice::new_or_warp()?;
+    let mut chain = create_chain(
+        &device,
+        &window,
+        width as u32,
+        height as u32,
+        requested_dpi.get(),
+    )?;
+    let mut state = ApplicationState::default();
+    let mut applied_dpi = requested_dpi.get();
     let mut dirty = true;
     run_with(|| {
         while let Ok(change) = rx.try_recv() {
-            dirty |= apply_change(&mut sessions, change);
+            dirty |= state.apply(change);
         }
         let (width, height) = window.client_size();
         if width as u32 != chain.width() || height as u32 != chain.height() {
             chain.resize(width as u32, height as u32)?;
             dirty = true;
         }
+        let dpi = requested_dpi.get();
+        if dpi != applied_dpi {
+            applied_dpi = dpi;
+            dirty = true;
+        }
+        chain.set_dpi(dpi, dpi);
+        let scale = dpi / 96.0;
+        chain.set_composition_scale(scale, scale);
         if !dirty {
             return Ok(false);
         }
-        let width = chain.width() as f32;
-        let height = chain.height() as f32;
-        let session = chain.begin_draw()?;
-        session.clear(ColorF::from_rgb8(248, 249, 251));
-        let brush = session.create_solid_brush(ColorF::from_rgb8(30, 35, 42))?;
-        let header = TextFormat::new_bold("Segoe UI", 22.0)?;
-        session.draw_text(
-            "Recent local sessions",
-            &header,
-            &Rect::new(24.0, 18.0, width - 24.0, 52.0),
-            &brush,
-        );
-        let subhead = TextFormat::new("Segoe UI", 12.0)?;
-        session.draw_text(
-            "Recorded local readiness — not exact open chats",
-            &subhead,
-            &Rect::new(24.0, 52.0, width - 24.0, 76.0),
-            &brush,
-        );
-        let row_format = TextFormat::new("Segoe UI", 15.0)?;
-        for (index, item) in sessions.iter().enumerate() {
-            let top = 92.0 + index as f32 * 30.0;
-            let label = item
-                .title
-                .as_deref()
-                .filter(|title| !title.is_empty())
-                .unwrap_or("(untitled)");
-            let label: String = label
-                .chars()
-                .map(|c| if c.is_control() { ' ' } else { c })
-                .take(64)
-                .collect();
-            let text = format!("{label}    {}", item.readiness.as_str());
-            session.draw_text(
-                &text,
-                &row_format,
-                &Rect::new(28.0, top, width - 24.0, top + 26.0),
-                &brush,
-            );
-            if top + 30.0 > height {
-                break;
+        match draw(&mut chain, &state) {
+            Ok(true) => {}
+            Ok(false) => {
+                device = GpuDevice::new_or_warp()?;
+                chain = create_chain(
+                    &device,
+                    &window,
+                    width as u32,
+                    height as u32,
+                    requested_dpi.get(),
+                )?;
+                applied_dpi = requested_dpi.get();
             }
+            Err(error) if is_device_lost(error.code()) || chain.is_device_lost() => {
+                device = GpuDevice::new_or_warp()?;
+                chain = create_chain(
+                    &device,
+                    &window,
+                    width as u32,
+                    height as u32,
+                    requested_dpi.get(),
+                )?;
+                applied_dpi = requested_dpi.get();
+            }
+            Err(error) => return Err(error),
         }
-        drop(session);
-        chain.present()?;
         dirty = false;
         Ok(false)
     })
 }
 
-fn apply_change(sessions: &mut Vec<SessionViewModel>, change: SessionChange) -> bool {
-    match change {
-        SessionChange::Snapshot(items) => {
-            sessions.clear();
-            sessions.extend(items);
-            true
-        }
-        SessionChange::Updated(item) => {
-            if let Some(existing) = sessions.iter_mut().find(|existing| existing.id == item.id) {
-                *existing = item;
-            } else {
-                sessions.push(item);
-            }
-            true
-        }
-        SessionChange::Removed(id) => {
-            let length = sessions.len();
-            sessions.retain(|item| item.id != id);
-            sessions.len() != length
-        }
-        SessionChange::ObservationDegraded { id } => sessions
-            .iter_mut()
-            .find(|item| item.id == id)
-            .map(|item| {
-                item.readiness = crate::readiness::Readiness::Unknown;
-                true
-            })
-            .unwrap_or(false),
+fn send_changes(
+    tx: &Sender<SessionChange>,
+    hwnd: usize,
+    changes: impl IntoIterator<Item = SessionChange>,
+) {
+    for change in changes {
+        let _ = tx.send(change);
     }
+    post_wake(hwnd);
+}
+
+fn send_change(tx: &Sender<SessionChange>, hwnd: usize, change: SessionChange) {
+    let _ = tx.send(change);
+    post_wake(hwnd);
+}
+
+fn post_wake(hwnd: usize) {
+    unsafe {
+        PostMessageW(hwnd as _, WATCHER_UPDATE, 0, 0);
+    }
+}
+
+fn create_chain(
+    device: &GpuDevice,
+    window: &Window,
+    width: u32,
+    height: u32,
+    dpi: f32,
+) -> windows_canvas::Result<SwapChain> {
+    let mut chain = device.create_swap_chain_for_window(window, width, height)?;
+    chain.set_dpi(dpi, dpi);
+    Ok(chain)
+}
+
+fn draw(chain: &mut SwapChain, state: &ApplicationState) -> windows_canvas::Result<bool> {
+    let width = chain.width() as f32;
+    let height = chain.height() as f32;
+    let session = chain.begin_draw()?;
+    session.clear(ColorF::from_rgb8(248, 249, 251));
+    let brush = session.create_solid_brush(ColorF::from_rgb8(30, 35, 42))?;
+    let header = TextFormat::new_bold("Segoe UI", 22.0)?;
+    let title = if state.observation_degraded {
+        "Observation unavailable"
+    } else {
+        "Recent local sessions"
+    };
+    session.draw_text(
+        title,
+        &header,
+        &Rect::new(24.0, 18.0, width - 24.0, 52.0),
+        &brush,
+    );
+    let subhead = TextFormat::new("Segoe UI", 12.0)?;
+    session.draw_text(
+        "Recorded local readiness — not exact open chats",
+        &subhead,
+        &Rect::new(24.0, 52.0, width - 24.0, 76.0),
+        &brush,
+    );
+    let row_format = TextFormat::new("Segoe UI", 15.0)?;
+    for (index, item) in state.sessions().iter().enumerate() {
+        let top = 92.0 + index as f32 * 30.0;
+        let label = item
+            .title
+            .as_deref()
+            .filter(|title| !title.is_empty())
+            .unwrap_or("(untitled)");
+        let label: String = label
+            .chars()
+            .map(|c| if c.is_control() { ' ' } else { c })
+            .take(64)
+            .collect();
+        let text = format!("{label}    {}", item.readiness.as_str());
+        session.draw_text(
+            &text,
+            &row_format,
+            &Rect::new(28.0, top, width - 24.0, top + 26.0),
+            &brush,
+        );
+        if top + 30.0 > height {
+            break;
+        }
+    }
+    drop(session);
+    chain.present()
 }

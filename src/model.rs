@@ -25,28 +25,158 @@ pub enum SessionChange {
     Updated(SessionViewModel),
     Removed(String),
     ObservationDegraded { id: String },
+    ObservationTerminated,
+}
+
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct ApplicationState {
+    sessions: Vec<SessionViewModel>,
+    pub observation_degraded: bool,
+}
+
+impl ApplicationState {
+    pub fn sessions(&self) -> &[SessionViewModel] {
+        &self.sessions
+    }
+
+    pub fn apply(&mut self, change: SessionChange) -> bool {
+        match change {
+            SessionChange::Snapshot(mut items) => {
+                items.sort_by(session_ordering);
+                self.sessions = items;
+                true
+            }
+            SessionChange::Updated(item) => {
+                if let Some(existing) = self
+                    .sessions
+                    .iter_mut()
+                    .find(|existing| existing.id == item.id)
+                {
+                    *existing = item;
+                } else {
+                    self.sessions.push(item);
+                }
+                self.sessions.sort_by(session_ordering);
+                true
+            }
+            SessionChange::Removed(id) => {
+                let length = self.sessions.len();
+                self.sessions.retain(|item| item.id != id);
+                self.sessions.len() != length
+            }
+            SessionChange::ObservationDegraded { id } => {
+                if let Some(item) = self.sessions.iter_mut().find(|item| item.id == id) {
+                    item.readiness = Readiness::Unknown;
+                    self.observation_degraded = true;
+                    true
+                } else {
+                    false
+                }
+            }
+            SessionChange::ObservationTerminated => {
+                self.observation_degraded = true;
+                let mut changed = false;
+                for item in &mut self.sessions {
+                    if item.readiness != Readiness::Unknown {
+                        item.readiness = Readiness::Unknown;
+                        changed = true;
+                    }
+                }
+                changed || self.sessions.is_empty()
+            }
+        }
+    }
+}
+
+fn session_ordering(left: &SessionViewModel, right: &SessionViewModel) -> std::cmp::Ordering {
+    right
+        .recency_at_ms
+        .cmp(&left.recency_at_ms)
+        .then_with(|| left.id.cmp(&right.id))
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{SessionChange, SessionViewModel};
+    use super::{ApplicationState, SessionChange, SessionViewModel};
     use crate::readiness::Readiness;
 
-    fn session(id: &str, readiness: Readiness) -> SessionViewModel {
+    fn session(id: &str, readiness: Readiness, recency_at_ms: i64) -> SessionViewModel {
         SessionViewModel {
             id: id.into(),
             title: None,
             readiness,
-            recency_at_ms: 0,
+            recency_at_ms,
         }
     }
 
     #[test]
-    fn typed_changes_preserve_row_identity_and_unknown() {
-        let update = SessionChange::Updated(session("root", Readiness::Unknown));
+    fn initial_snapshot_is_ordered_by_recency_then_id() {
+        let mut state = ApplicationState::default();
+        state.apply(SessionChange::Snapshot(vec![
+            session("b", Readiness::Ready, 10),
+            session("a", Readiness::Ready, 20),
+            session("c", Readiness::Ready, 20),
+        ]));
         assert_eq!(
-            update,
-            SessionChange::Updated(session("root", Readiness::Unknown))
+            state
+                .sessions()
+                .iter()
+                .map(|item| item.id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["a", "c", "b"]
         );
+    }
+
+    #[test]
+    fn targeted_update_changes_only_one_row_and_preserves_order() {
+        let mut state = ApplicationState::default();
+        state.apply(SessionChange::Snapshot(vec![
+            session("a", Readiness::Ready, 20),
+            session("b", Readiness::Working, 10),
+        ]));
+        state.apply(SessionChange::Updated(session("b", Readiness::Ready, 10)));
+        assert_eq!(state.sessions()[0].readiness, Readiness::Ready);
+        assert_eq!(state.sessions()[1].id, "b");
+    }
+
+    #[test]
+    fn add_and_remove_update_the_visible_set() {
+        let mut state = ApplicationState::default();
+        state.apply(SessionChange::Snapshot(vec![session(
+            "a",
+            Readiness::Ready,
+            1,
+        )]));
+        state.apply(SessionChange::Updated(session("b", Readiness::Working, 2)));
+        assert_eq!(
+            state
+                .sessions()
+                .iter()
+                .map(|item| item.id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["b", "a"]
+        );
+        assert!(state.apply(SessionChange::Removed("b".into())));
+        assert_eq!(
+            state
+                .sessions()
+                .iter()
+                .map(|item| item.id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["a"]
+        );
+    }
+
+    #[test]
+    fn observation_degradation_is_unknown_and_visible() {
+        let mut state = ApplicationState::default();
+        state.apply(SessionChange::Snapshot(vec![session(
+            "a",
+            Readiness::Working,
+            1,
+        )]));
+        state.apply(SessionChange::ObservationTerminated);
+        assert_eq!(state.sessions()[0].readiness, Readiness::Unknown);
+        assert!(state.observation_degraded);
     }
 }

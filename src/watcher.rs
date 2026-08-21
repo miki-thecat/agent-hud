@@ -183,6 +183,12 @@ impl LiveWatcher {
         )]
     }
 
+    pub fn degrade(&mut self) -> Vec<SessionChange> {
+        let mut changes = self.fail_closed();
+        changes.push(SessionChange::ObservationTerminated);
+        changes
+    }
+
     pub fn watch(&mut self) -> io::Result<Receiver<notify::Result<Event>>> {
         let (tx, rx) = mpsc::channel();
         let mut watcher: RecommendedWatcher = notify::recommended_watcher(move |event| {
@@ -243,7 +249,7 @@ impl LiveWatcher {
             Ok(lines) => lines,
             Err(error) => {
                 eprintln!("agent-hud: recovery failed; failing closed: {error}");
-                self.fail_closed()
+                self.degrade()
             }
         }
     }
@@ -498,9 +504,11 @@ mod tests {
         );
         fs::remove_file(root.join("state_5.sqlite")).unwrap();
 
-        assert!(
-            matches!(watcher.recover().as_slice(), [SessionChange::ObservationDegraded { id }] if id == "root")
-        );
+        assert!(matches!(
+            watcher.recover().as_slice(),
+            [SessionChange::ObservationDegraded { id }, SessionChange::ObservationTerminated]
+                if id == "root"
+        ));
         assert!(
             matches!(watcher.initial_changes().as_slice(), [SessionChange::Snapshot(items)] if items[0].readiness == Readiness::Unknown)
         );

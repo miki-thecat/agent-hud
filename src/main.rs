@@ -152,5 +152,8 @@ fn print_change(change: SessionChange) {
         }
         SessionChange::Removed(id) => println!("CHANGE {id} REMOVED"),
         SessionChange::ObservationDegraded { id } => println!("CHANGE {id} UNKNOWN"),
+        SessionChange::ObservationTerminated => {
+            eprintln!("agent-hud: observation terminated; readiness is UNKNOWN");
+        }
     }
 }
