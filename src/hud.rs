@@ -246,7 +246,8 @@ fn draw(chain: &mut SwapChain, state: &ApplicationState) -> windows_canvas::Resu
         &Rect::new(24.0, 52.0, width - 24.0, 76.0),
         &brush,
     );
-    let row_format = TextFormat::new("Segoe UI", 15.0)?;
+    let project_format = TextFormat::new_bold("Segoe UI", 15.0)?;
+    let row_format = TextFormat::new("Segoe UI", 13.0)?;
     let status_format = TextFormat::new_bold("Segoe UI", 12.0)?;
     let status_left = (width - 136.0).clamp(0.0, (width - 112.0).max(0.0));
     if state.observation_degraded {
@@ -262,22 +263,37 @@ fn draw(chain: &mut SwapChain, state: &ApplicationState) -> windows_canvas::Resu
     }
     for (index, item) in state.sessions().iter().enumerate() {
         let top = 92.0 + index as f32 * 30.0;
-        let label = item
+        let title = item
             .title
             .as_deref()
             .filter(|title| !title.is_empty())
             .unwrap_or("(untitled)");
-        let label: String = label
+        let title: String = title
             .chars()
             .map(|c| if c.is_control() { ' ' } else { c })
             .take(64)
             .collect();
-        session.draw_text(
-            &label,
-            &row_format,
-            &Rect::new(28.0, top, status_left - 16.0, top + 28.0),
-            &brush,
-        );
+        if let Some(project) = item.project_label.as_deref() {
+            session.draw_text(
+                project,
+                &project_format,
+                &Rect::new(28.0, top, 150.0, top + 28.0),
+                &brush,
+            );
+            session.draw_text(
+                &title,
+                &row_format,
+                &Rect::new(158.0, top + 2.0, status_left - 16.0, top + 26.0),
+                &brush,
+            );
+        } else {
+            session.draw_text(
+                &title,
+                &row_format,
+                &Rect::new(28.0, top + 2.0, status_left - 16.0, top + 26.0),
+                &brush,
+            );
+        }
         draw_status_badge(
             &session,
             &status_format,
@@ -371,6 +387,7 @@ mod tests {
         SessionViewModel {
             id: id.into(),
             title: None,
+            project_label: None,
             readiness: Readiness::Ready,
             needs_attention: false,
             recency_at_ms,

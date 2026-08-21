@@ -344,7 +344,7 @@ mod tests {
         connection
             .execute_batch(
                 "CREATE TABLE threads (
-                    id TEXT, title TEXT, rollout_path TEXT,
+                    id TEXT, title TEXT, cwd TEXT, rollout_path TEXT,
                     recency_at_ms INTEGER, updated_at_ms INTEGER,
                     thread_source TEXT, archived INTEGER
                 );",
@@ -352,7 +352,7 @@ mod tests {
             .unwrap();
         connection
             .execute(
-                "INSERT INTO threads VALUES ('root', 'Synthetic', ?1, 1, 1, 'user', 0)",
+                "INSERT INTO threads VALUES ('root', 'Synthetic', NULL, ?1, 1, 1, 'user', 0)",
                 [rollout_path.to_string_lossy().as_ref()],
             )
             .unwrap();

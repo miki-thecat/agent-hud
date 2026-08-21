@@ -4,6 +4,7 @@ use crate::{discovery::SessionSnapshot, readiness::Readiness};
 pub struct SessionViewModel {
     pub id: String,
     pub title: Option<String>,
+    pub project_label: Option<String>,
     pub readiness: Readiness,
     pub needs_attention: bool,
     pub recency_at_ms: i64,
@@ -14,6 +15,7 @@ impl From<&SessionSnapshot> for SessionViewModel {
         Self {
             id: snapshot.id.clone(),
             title: snapshot.title.clone(),
+            project_label: snapshot.project_label.clone(),
             readiness: snapshot.readiness,
             needs_attention: false,
             recency_at_ms: snapshot.recency_at_ms,
@@ -139,12 +141,14 @@ fn session_ordering(left: &SessionViewModel, right: &SessionViewModel) -> std::c
 #[cfg(test)]
 mod tests {
     use super::{ApplicationState, SessionChange, SessionViewModel};
-    use crate::readiness::Readiness;
+    use crate::{discovery::SessionSnapshot, readiness::Readiness};
+    use std::path::PathBuf;
 
     fn session(id: &str, readiness: Readiness, recency_at_ms: i64) -> SessionViewModel {
         SessionViewModel {
             id: id.into(),
             title: None,
+            project_label: None,
             readiness,
             needs_attention: false,
             recency_at_ms,
@@ -167,6 +171,27 @@ mod tests {
                 .collect::<Vec<_>>(),
             vec!["a", "c", "b"]
         );
+    }
+
+    #[test]
+    fn project_context_propagates_without_changing_readiness_or_attention() {
+        let snapshot = SessionSnapshot {
+            id: "a".into(),
+            title: Some("A task".into()),
+            cwd: Some(r"C:\Users\kanat\dev\agent-hud".into()),
+            project_label: Some("agent-hud".into()),
+            readiness: Readiness::Ready,
+            recency_at_ms: 1,
+            lifecycle_timestamp: None,
+            rollout_path: PathBuf::from("rollout.jsonl"),
+        };
+        let mut state = ApplicationState::default();
+        state.apply(SessionChange::Snapshot(vec![(&snapshot).into()]));
+
+        let session = &state.sessions()[0];
+        assert_eq!(session.project_label.as_deref(), Some("agent-hud"));
+        assert_eq!(session.readiness, Readiness::Ready);
+        assert!(!session.needs_attention);
     }
 
     #[test]
