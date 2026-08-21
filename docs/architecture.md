@@ -170,6 +170,18 @@ On startup, reconstruct the currently useful state from the verified Codex sourc
 
 Persistence may be introduced only for a concrete requirement such as durable user configuration that cannot be represented more simply. Session history itself is not an MVP requirement.
 
+### Persisted discovery boundary
+
+Phase 1C validates a deliberately bounded local discovery catalog for the
+current installation: select unarchived `threads` rows with
+`thread_source=user`, validate their `id -> rollout_path -> session_meta`
+identity chain, and retain a fixed recent maximum (20). This is a **Recent
+local sessions** catalog, not evidence of currently open Codex App chats or
+Desktop-window ownership. Recency is permitted only to sort/bound persisted
+history; it must not establish a live or working state. Exclude subagent rows
+and fail closed on identity mismatch. See
+`docs/research/phase-1c-session-discovery-result.md`.
+
 ## Network
 
 No separate application network dependency.
