@@ -167,7 +167,8 @@ Avoid:
 - unnecessary retained off-screen surfaces.
 
 The standalone canvas host applies the current per-monitor DPI to the swap
-chain and composition scale on DPI messages and recreates the focused
+chain on DPI messages. It intentionally keeps the raw-HWND composition scale at
+identity because this is not a composition surface, and recreates the focused
 `GpuDevice`/swap chain when `windows-canvas` reports device loss. This keeps the
 native lifecycle local to the platform shell without adding a UI framework.
 

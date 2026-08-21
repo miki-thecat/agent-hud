@@ -74,6 +74,7 @@ impl ApplicationState {
                 }
             }
             SessionChange::ObservationTerminated => {
+                let degraded_changed = !self.observation_degraded;
                 self.observation_degraded = true;
                 let mut changed = false;
                 for item in &mut self.sessions {
@@ -82,7 +83,7 @@ impl ApplicationState {
                         changed = true;
                     }
                 }
-                changed || self.sessions.is_empty()
+                degraded_changed || changed || self.sessions.is_empty()
             }
         }
     }
@@ -178,5 +179,19 @@ mod tests {
         state.apply(SessionChange::ObservationTerminated);
         assert_eq!(state.sessions()[0].readiness, Readiness::Unknown);
         assert!(state.observation_degraded);
+    }
+
+    #[test]
+    fn observation_termination_repaints_when_rows_are_already_unknown() {
+        let mut state = ApplicationState::default();
+        state.apply(SessionChange::Snapshot(vec![session(
+            "a",
+            Readiness::Unknown,
+            1,
+        )]));
+
+        assert!(state.apply(SessionChange::ObservationTerminated));
+        assert!(state.observation_degraded);
+        assert_eq!(state.sessions()[0].readiness, Readiness::Unknown);
     }
 }
