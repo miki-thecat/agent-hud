@@ -114,14 +114,10 @@ fn validate_metadata(metadata: &Value, expected_id: &str) -> Result<(), Discover
     if payload.get("id").and_then(Value::as_str) != Some(expected_id) {
         return Err(DiscoveryError::IdentityMismatch);
     }
-    if let Some(session_id) = payload.get("session_id")
-        && session_id.as_str() != Some(expected_id)
-    {
+    if payload.get("session_id").and_then(Value::as_str) != Some(expected_id) {
         return Err(DiscoveryError::IdentityMismatch);
     }
-    if let Some(thread_source) = payload.get("thread_source")
-        && thread_source.as_str() != Some("user")
-    {
+    if payload.get("thread_source").and_then(Value::as_str) != Some("user") {
         return Err(DiscoveryError::IdentityMismatch);
     }
     Ok(())
@@ -320,6 +316,52 @@ mod tests {
         let connection = setup_database(&database);
         let path = root.join("malformed.jsonl");
         fs::write(&path, "{\"type\":\"session_meta\",\"payload\":{}}\n").unwrap();
+        insert(&connection, "root", &path, 10, "user");
+        drop(connection);
+
+        assert!(
+            snapshot_from_paths(&database, RECENT_SESSION_LIMIT)
+                .unwrap()
+                .is_empty()
+        );
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn rollout_missing_session_id_is_excluded() {
+        let root = workspace("missing-session-id");
+        let database = root.join("state.sqlite");
+        let connection = setup_database(&database);
+        let path = root.join("rollout.jsonl");
+        fs::write(
+            &path,
+            rollout("root", &event("task_complete", "turn"))
+                .replace("\"session_id\":\"root\",", ""),
+        )
+        .unwrap();
+        insert(&connection, "root", &path, 10, "user");
+        drop(connection);
+
+        assert!(
+            snapshot_from_paths(&database, RECENT_SESSION_LIMIT)
+                .unwrap()
+                .is_empty()
+        );
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn rollout_missing_thread_source_is_excluded() {
+        let root = workspace("missing-thread-source");
+        let database = root.join("state.sqlite");
+        let connection = setup_database(&database);
+        let path = root.join("rollout.jsonl");
+        fs::write(
+            &path,
+            rollout("root", &event("task_complete", "turn"))
+                .replace(",\"thread_source\":\"user\"", ""),
+        )
+        .unwrap();
         insert(&connection, "root", &path, 10, "user");
         drop(connection);
 
