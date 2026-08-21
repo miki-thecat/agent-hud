@@ -60,6 +60,12 @@ Windows-first candidate stack:
 - memory-only session state,
 - standard-library threading/channels unless measured complexity requires more.
 
+The focused `windows-window` and `windows-canvas` crates are currently consumed
+from the Microsoft `windows-rs` repository revision selected by Cargo because
+the documented `0.100` examples are not published as usable crates.io releases
+in the current installation. The API is the official Microsoft stack; the git
+source can move to a released version once those crates are published.
+
 This is deliberately thinner than a browser-backed desktop stack.
 
 Do not add Electron, Tauri/WebView, Node.js, React, or another browser runtime merely for UI convenience without an accepted architecture change backed by evidence that the native path is the wrong lifecycle trade-off.

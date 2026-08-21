@@ -41,6 +41,10 @@ Rollout appends are parsed incrementally; persisted discovery/WAL changes cause
 a bounded reconciliation. The output is still a **Recent local sessions**
 view, not a claim about currently open Codex App chats.
 
+On Windows, launching the binary without `--watch` opens the native HUD. It
+uses the same typed watcher state and labels the bounded list **Recent local
+sessions** so persisted discovery is not confused with exact open chats.
+
 ## Product principles
 
 1. **Fast and lightweight first.** Startup latency, idle CPU, memory footprint, and event-to-paint latency are product requirements.

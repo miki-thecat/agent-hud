@@ -1,10 +1,16 @@
 mod discovery;
+mod model;
 mod readiness;
 mod watcher;
 
+#[cfg(windows)]
+mod hud;
+
 use std::{env, path::PathBuf, process::ExitCode};
 
+#[cfg(not(windows))]
 use discovery::{RECENT_SESSION_LIMIT, snapshot_from_paths};
+use model::SessionChange;
 
 fn codex_home() -> Result<PathBuf, String> {
     env::var_os("USERPROFILE")
@@ -18,6 +24,7 @@ fn codex_home() -> Result<PathBuf, String> {
         .ok_or_else(|| "cannot resolve the Windows user profile".to_owned())
 }
 
+#[cfg(not(windows))]
 fn display_label(title: Option<&str>) -> String {
     let title = title
         .filter(|title| !title.is_empty())
@@ -47,6 +54,15 @@ fn main() -> ExitCode {
     if env::args().any(|argument| argument == "--watch") {
         return watch(database_path);
     }
+    #[cfg(windows)]
+    return hud::run(database_path);
+
+    #[cfg(not(windows))]
+    snapshot_cli(database_path)
+}
+
+#[cfg(not(windows))]
+fn snapshot_cli(database_path: PathBuf) -> ExitCode {
     let snapshots = match snapshot_from_paths(&database_path, RECENT_SESSION_LIMIT) {
         Ok(snapshots) => snapshots,
         Err(error) => {
@@ -88,8 +104,8 @@ fn watch(database_path: PathBuf) -> ExitCode {
             return ExitCode::FAILURE;
         }
     };
-    for line in watcher.initial_lines() {
-        println!("{line}");
+    for change in watcher.initial_changes() {
+        print_change(change);
     }
     let events = match watcher.watch() {
         Ok(events) => events,
@@ -102,24 +118,39 @@ fn watch(database_path: PathBuf) -> ExitCode {
         match event {
             Ok(event) => match watcher.handle_event(&event) {
                 Ok(lines) => {
-                    for line in lines {
-                        println!("{line}");
+                    for change in lines {
+                        print_change(change);
                     }
                 }
                 Err(error) => {
                     eprintln!("agent-hud: observer event failed; recovering: {error}");
-                    for line in watcher.recover() {
-                        println!("{line}");
+                    for change in watcher.recover() {
+                        print_change(change);
                     }
                 }
             },
             Err(error) => {
                 eprintln!("agent-hud: filesystem observation error; recovering: {error}");
-                for line in watcher.recover() {
-                    println!("{line}");
+                for change in watcher.recover() {
+                    print_change(change);
                 }
             }
         }
     }
     ExitCode::SUCCESS
+}
+
+fn print_change(change: SessionChange) {
+    match change {
+        SessionChange::Snapshot(sessions) => {
+            for session in sessions {
+                println!("INITIAL {} {}", session.id, session.readiness.as_str());
+            }
+        }
+        SessionChange::Updated(session) => {
+            println!("CHANGE {} {}", session.id, session.readiness.as_str());
+        }
+        SessionChange::Removed(id) => println!("CHANGE {id} REMOVED"),
+        SessionChange::ObservationDegraded { id } => println!("CHANGE {id} UNKNOWN"),
+    }
 }

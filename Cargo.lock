@@ -9,6 +9,9 @@ dependencies = [
  "notify",
  "rusqlite",
  "serde_json",
+ "windows-canvas",
+ "windows-sys 0.61.2",
+ "windows-window",
 ]
 
 [[package]]
@@ -342,10 +345,60 @@ dependencies = [
 ]
 
 [[package]]
+name = "windows-canvas"
+version = "0.100.0"
+source = "git+https://github.com/microsoft/windows-rs#acaaa37be53e68f8c1be575d24dcbebce1e92b1a"
+dependencies = [
+ "windows-core",
+ "windows-numerics",
+ "windows-window",
+]
+
+[[package]]
+name = "windows-core"
+version = "0.100.0"
+source = "git+https://github.com/microsoft/windows-rs#acaaa37be53e68f8c1be575d24dcbebce1e92b1a"
+dependencies = [
+ "windows-link 0.100.0",
+ "windows-result",
+ "windows-strings",
+]
+
+[[package]]
 name = "windows-link"
 version = "0.2.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f0805222e57f7521d6a62e36fa9163bc891acd422f971defe97d64e70d0a4fe5"
+
+[[package]]
+name = "windows-link"
+version = "0.100.0"
+source = "git+https://github.com/microsoft/windows-rs#acaaa37be53e68f8c1be575d24dcbebce1e92b1a"
+
+[[package]]
+name = "windows-numerics"
+version = "0.100.0"
+source = "git+https://github.com/microsoft/windows-rs#acaaa37be53e68f8c1be575d24dcbebce1e92b1a"
+dependencies = [
+ "windows-core",
+ "windows-link 0.100.0",
+]
+
+[[package]]
+name = "windows-result"
+version = "0.100.0"
+source = "git+https://github.com/microsoft/windows-rs#acaaa37be53e68f8c1be575d24dcbebce1e92b1a"
+dependencies = [
+ "windows-link 0.100.0",
+]
+
+[[package]]
+name = "windows-strings"
+version = "0.100.0"
+source = "git+https://github.com/microsoft/windows-rs#acaaa37be53e68f8c1be575d24dcbebce1e92b1a"
+dependencies = [
+ "windows-link 0.100.0",
+]
 
 [[package]]
 name = "windows-sys"
@@ -362,7 +415,7 @@ version = "0.61.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ae137229bcbd6cdf0f7b80a31df61766145077ddf49416a728b02cb3921ff3fc"
 dependencies = [
- "windows-link",
+ "windows-link 0.2.1",
 ]
 
 [[package]]
@@ -371,7 +424,7 @@ version = "0.53.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "4945f9f551b88e0d65f3db0bc25c33b8acea4d9e41163edf90dcd0b19f9069f3"
 dependencies = [
- "windows-link",
+ "windows-link 0.2.1",
  "windows_aarch64_gnullvm",
  "windows_aarch64_msvc",
  "windows_i686_gnu",
@@ -380,6 +433,14 @@ dependencies = [
  "windows_x86_64_gnu",
  "windows_x86_64_gnullvm",
  "windows_x86_64_msvc",
+]
+
+[[package]]
+name = "windows-window"
+version = "0.100.0"
+source = "git+https://github.com/microsoft/windows-rs#acaaa37be53e68f8c1be575d24dcbebce1e92b1a"
+dependencies = [
+ "windows-core",
 ]
 
 [[package]]
