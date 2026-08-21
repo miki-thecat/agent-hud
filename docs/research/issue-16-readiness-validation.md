@@ -111,5 +111,4 @@ The implementation and documentation agree on the claim ceiling:
 This validation does not establish a supported passive live Desktop status API,
 approval/user-input observation, or the internal Desktop-to-rollout flush
 latency. Those limits remain documented in the Phase 0 and Phase 1 research
-results and are unchanged by Issue #16.
-
+ results and are unchanged by Issue #16.
