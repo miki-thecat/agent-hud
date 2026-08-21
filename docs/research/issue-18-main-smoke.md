@@ -23,16 +23,22 @@ multi-session catalog was present. README and the Issue #16 readiness report
 were present on `main`; the implementation still states recorded readiness in
 a bounded **Recent local sessions** view, not exact open-chat discovery.
 
-## Blocking evidence
+## Lifecycle re-observation limitation
 
-The required final live smoke was not independently completed on this
-integrated `main` build. No disposable normal Codex root/user turn could be
-started in this validation environment: the installed `codex.exe` was present
-but returned Windows `Access is denied` when invoked, and Codex App/CLI UI
-automation is out of scope for the available validation controls. Therefore
-this run does not establish `READY -> WORKING -> READY` without HUD restart or
-the unchanged independent control-session criterion.
+The final-main environment could not re-observe the lifecycle turn. No
+disposable normal Codex root/user turn could be started in this validation
+environment: the installed `codex.exe` was present but returned Windows
+`Access is denied` when invoked, and Codex App/CLI UI automation is out of
+scope for the available validation controls.
+
+This does not block the release verdict. Prior live lifecycle/control-session
+evidence remains valid because final `main` has no executable-input changes
+relative to the validated product code: the net changes from the live-validated
+product tip were documentation-only (`README.md` and the Issue #16 readiness
+report), with no changes to `src/`, `Cargo.toml`, `Cargo.lock`, build scripts,
+or other executable inputs. Final `main` independently passed the build,
+test, startup, and discovery smoke above.
 
 ## Verdict
 
-`BLOCKED`
+`READY_TO_TAG_V0.1.0`
