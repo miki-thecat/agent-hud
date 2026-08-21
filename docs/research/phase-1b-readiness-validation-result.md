@@ -5,128 +5,138 @@ Branch: `spike/windows-codex-observation`
 
 ## Verdict
 
-Primary verdict: `TASK_COMPLETE_READINESS_STILL_UNCERTAIN`.
+Primary verdict: `SUPPORTED_FOR_RECORDED_ROOT_TURN_READINESS`.
 
-A persisted `task_complete` record is evidence that a rollout recorded a turn
-completion boundary. This task did not perform the required controlled Desktop
-turn experiments, so it cannot establish whether that boundary is sufficient
-for the product's human-readiness claim. In particular, the available
-historical evidence does not establish current Desktop ownership, that no
-newer turn exists, that no turn/item remains active, or that an approval or
-user-input request is not pending.
+In the controlled local Codex Desktop task below, each normal turn ended with
+`event_msg.task_complete` for its `turn_id`. After the first completion, a
+second ordinary instruction was accepted in the same task and produced a
+newer `task_started`; after that completion, a harmless command/tool turn was
+accepted and produced a third `task_started`. The supported app task control
+reported the latter two turns `completed` and the thread `idle` at the same
+boundaries.
 
-The proposed four-state reducer remains valid:
+For the product question — *can the human send the next instruction now?* — a
+persisted `task_complete` for the latest correctly identified root/user turn
+is sufficient to transition that rollout-derived session to `READY`. This is
+not a claim that the broader task succeeded or that its implementation is
+correct.
+
+The signal is `AUTHORITATIVE_FOR_RECORDED_TURN_LIFECYCLE`: it authoritatively
+records a turn boundary in the rollout, but is not a documented general-purpose
+passive Desktop live-status API. It cannot identify approval/user-input waits
+or prove Desktop ownership outside the correlated task. Preserve `UNKNOWN`
+when identity, ordering, or root/user-turn scope is ambiguous.
+
+## Environment and safety
+
+- Windows API version previously recorded for this host: `10.0.26200.0`.
+- Current local rollout metadata reported `cli_version=0.148.0-alpha.15`.
+- Test thread: `01a0238b-b1df-7dc1-a171-9b151ac38111` (disposable local
+  Codex Desktop task).
+- Rollout: `%USERPROFILE%\.codex\sessions\2026\08\21\rollout-2026-08-21T17-59-12-01a0238b-b1df-7dc1-a171-9b151ac38111.jsonl`.
+- The watcher only read that JSONL file. It began before the second turn and
+  sampled for appended records every 50 ms; no rollout, index, or state DB
+  file was modified.
+- The test used ordinary safe prompts and one `Get-Date -Format o` command.
+  It did not touch repository files, use app-server attachment, acknowledge
+  approval/user-input requests, inject into a process, scrape UI/memory, or
+  execute a destructive command.
+
+## Procedure and observations
+
+The prompts are omitted apart from their harmless expected markers. IDs and
+lifecycle metadata are retained; message and command output content are not.
+
+| Experiment | Turn ID | Ordered decisive records | Desktop/task result |
+| --- | --- | --- | --- |
+| A — normal | `01a0238b-b3c3-70a3-8700-3e05304d53e8` | 2 `task_started` (08:59:13) → 11 `AgentMessage` (08:59:16) → 14 `task_complete` (08:59:16) | Normal final marker returned. |
+| B — consecutive normal | `01a0238c-9099-7691-9a2a-ea0b43820454` | 16 `task_started` (09:00:09.934) → 20 `AgentMessage` (09:00:11.788) → 23 `task_complete` (09:00:11.864) | The second instruction was accepted after A; task control reported `completed`, thread `idle`. |
+| C — command/tool | `01a0238c-d9f8-7ef2-a640-de4758c0cd50` | 25 `task_started` (09:00:28.699) → 32 `CommandExecution` completed (09:00:34.373) → 35 `AgentMessage` (09:00:36.597) → 38 `task_complete` (09:00:36.872) | The third instruction was accepted after B; task control reported `completed`, thread `idle`. |
+
+The first task was created before its rollout was known, so its lifecycle was
+read immediately after completion. The passive watcher covered B and C from
+their starts through their terminal events.
+
+### Ordering, supersession, and state sequence
+
+The three turn IDs are distinct and source ordinals strictly increase. In
+particular, ordinal 16 `task_started` for B follows A's ordinal 14
+`task_complete`, and ordinal 25 `task_started` for C follows B's ordinal 23
+`task_complete`. Therefore an earlier completion cannot remain `READY` once a
+newer root/user-turn start is recorded.
 
 ```text
-WORKING | READY | ERROR | UNKNOWN
+UNKNOWN -> WORKING (A start) -> READY (A complete)
+        -> WORKING (B start) -> READY (B complete)
+        -> WORKING (C start) -> READY (C complete)
 ```
 
-The candidate reducer therefore remains unvalidated. Until controlled evidence
-shows that the persisted event has the required semantics and ordering, the
-existing conservative model must not transition to `READY` from
-`task_complete` alone.
+The completed command item at ordinal 32 did **not** end C: an additional
+agent message and `task_complete` followed about 2.499 seconds later. A
+command/item completion must not transition the session to `READY`.
 
-## Question and claim boundary
+## Visibility timing
 
-The tested product question is:
+These are record-timestamp-to-watcher-observation delays, not a measurement of
+the unobservable internal Desktop event-to-flush delay.
 
-> Can a human give this Codex Desktop session its next instruction now?
+| Record | Persisted timestamp | First watcher observation | Observed delay |
+| --- | --- | --- | ---: |
+| B `task_started` | 09:00:09.934Z | 09:00:10.0183731Z | 84 ms |
+| B `task_complete` | 09:00:11.864Z | 09:00:11.9129919Z | 49 ms |
+| C `CommandExecution` complete | 09:00:34.373Z | 09:00:34.4600479Z | 87 ms |
+| C `task_complete` | 09:00:36.872Z | 09:00:36.9713077Z | 99 ms |
 
-This is a readiness question, not a judgment about semantic task success,
-correctness, or whether the implementation is complete in the user's broader
-sense.
+The 50 ms watcher cadence bounds the next read after an append; scheduling and
+record timestamp granularity account for the observed 49–99 ms range. The
+upstream Desktop-to-file flush latency remains `NOT_MEASURED`.
 
-The strongest claim supported by the available evidence is narrower:
+## Edge cases and remaining uncertainty
 
-> A `task_complete` record was persisted in a particular rollout, at a
-> particular position and time.
+- `task_complete` followed normal agent messages in this sample. A completion
+  with `last_agent_message = null` was not exercised; it remains valid as a
+  *recorded turn boundary* if it has the same root/user identity and ordering,
+  but that exact variant is `NOT_VERIFIED`.
+- The tool turn confirms that item/command completion is non-terminal. It does
+  not establish semantic command success as session success.
+- Stale completion rejection is supported by the observed newer
+  `task_started` ordering; a reducer must retain turn ID and ordinal.
+- Subagent records were not mixed into this test. Do not apply this mapping to
+  subagent lifecycle records without an explicit root/user-thread mapping.
+- The watcher was not restarted during a completed rollout; reconstruction on
+  restart should choose the last lifecycle record for the latest root/user
+  turn, but this is `NOT_VERIFIED` live.
+- Abnormal termination is `NOT_VERIFIED`. No supported normal cancel/stop
+  control was exposed in this task environment, and handoff/process stopping
+  would not be a normal Desktop cancel experiment.
+- Approval and user-input waiting remain `UNAVAILABLE` from rollout JSONL.
+  This result must not be used to manufacture those attention states.
 
-The evidence does not establish:
+## Required state-model changes
 
-- that `task_complete => human can issue the next instruction`;
-- current `READY` state;
-- current Desktop session ownership;
-- absence of a pending approval or user-input request;
-- absence of a newer or still-active turn;
-- task success or implementation correctness;
-- safe live observation of Desktop-owned state;
-- the required `task_started -> task_complete` sequence for a controlled
-  Desktop turn;
-- the superseding behavior of a second user turn.
+Update the rollout-derived reducer for a deterministically correlated
+root/user thread:
 
-## Evidence used
+```text
+latest root/user lifecycle event
 
-The result is based on the existing read-only Windows rollout observation and
-the readiness-state design:
+task_started                    -> WORKING
+task_complete                   -> READY
+explicit terminal turn error    -> ERROR
+turn_aborted                    -> UNKNOWN (until normal Desktop cancellation is tested)
+no trustworthy lifecycle event  -> UNKNOWN
+```
 
-- `docs/research/phase-0c-rollout-observation-result.md` records that rollout
-  JSONL contains historical completion and message/item records, but no
-  authoritative live `WORKING`, `READY`, approval, or user-input field.
-- `docs/design/readiness-state-model.md` classifies rollout record identity,
-  ordinal, and timestamp as authoritative only for persisted history, while
-  classifying completion events and assistant messages as strong correlation.
-- The same design explicitly requires authoritative terminal evidence plus
-  proof that no pending work exists before `READY`.
+Only `task_started`, `task_complete`, and an explicit terminal error may
+change this state. Item completion, assistant-message completion, command
+completion, file changes, file mtime, process activity, and silence cannot.
+Use event ordinal and `turn_id`; a newer `task_started` supersedes an older
+completion immediately.
 
-These sources establish the event's historical meaning, but do not answer the
-Phase 1B question about current human readiness. The claim is therefore
-`STILL_UNCERTAIN`, not supported or disproven.
+## Final assessment
 
-## Controlled-experiment status
-
-No experiment was performed that created, resumed, steered, interrupted,
-approved, or answered a Codex Desktop session. Such operations would violate
-the repository's read-only/no-interference constraints. Existing naturally
-produced rollout records were used instead.
-
-This means the following acceptance criteria remain unverified in this phase:
-
-- a controlled normal Desktop turn observed from `task_started` through
-  `task_complete`;
-- a second user turn proving that a newer `task_started` supersedes READY;
-- intermediate tool/command events shown not to be readiness boundaries;
-- rollout visibility latency for a controlled test;
-- abnormal termination semantics, where safely reproducible;
-
-- a paired Desktop comparison of active, completed, approval-waiting, and
-  user-input-waiting sessions;
-- whether every actionable request is represented in rollout JSONL;
-- the flush timing between a Desktop event and its persisted record;
-- whether any private or undocumented live endpoint can be observed safely.
-
-The absence of those experiments means the candidate reducer cannot be
-promoted to an accepted product contract in this phase.
-
-## Reducer implications
-
-The adapter/reducer should apply these rules:
-
-1. Record `task_complete` as evidence with rollout identity,
-   sequence/ordinal, and event time.
-2. Do not yet accept it as a standalone transition to `READY`.
-3. Reject it when a newer active/pending observation supersedes it.
-4. Preserve `UNKNOWN` when only persisted rollout evidence is available.
-5. Permit `READY` only when a supported passive live source establishes a
-   terminal boundary and no pending work or actionable request remains.
-
-The UI may show a separately labelled historical completion/activity hint in a
-future diagnostic or offline view. It must not present that hint as live
-readiness.
-
-## Safety and side effects
-
-- No Codex Desktop UI was scraped.
-- No process injection, debugger attachment, or memory inspection was used.
-- No Desktop-owned request was acknowledged or answered.
-- No session was created, resumed, steered, interrupted, approved, or
-  answered.
-- No rollout, session index, or state database file was modified.
-
-## Recommended next step
-
-Keep the current reducer contract and fail closed when only rollout history is
-available. A future phase should target a documented, passive Windows
-Desktop/app-server status source that exposes current turn state, terminal
-state, and pending actionable requests with a proven non-interference
-contract. Do not promote `task_complete`, file growth, timestamps, process
-activity, or silence into `READY`.
+The controlled evidence supports `task_complete => human can issue the next
+instruction` for the latest, correlated root/user rollout turn. It does not
+turn rollout tailing into a supported general live Desktop status endpoint and
+does not erase the Phase 0 requirement to fail closed for unknown session
+identity, approval/user-input state, or unsupported observation paths.

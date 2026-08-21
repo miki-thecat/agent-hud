@@ -20,18 +20,20 @@ scrape process memory. If the observer cannot establish a state without
 interfering with Codex Desktop, the result is `UNKNOWN`.
 
 This is a reducer contract, not a claim that the current native-Windows
-installation can provide every input. The Phase 0 findings currently leave
-authoritative live per-Desktop-thread status unavailable; the adapter must fail
-closed until a supported passive source exists.
+installation can provide every input. Phase 1B controlled evidence establishes
+one narrow rollout-derived input: for a deterministically correlated root/user
+turn, the latest `task_started` / `task_complete` lifecycle record establishes
+the human-readiness boundary. It does not establish a general live Desktop
+status, approval/user-input status, or ownership contract; the adapter must
+still fail closed outside that narrow evidence boundary.
 
 ## State definitions
 
 ### `WORKING`
 
-The session is demonstrably processing work and has not reached a terminal
-completion boundary. This requires a trustworthy live observation of an active
-turn/item, or an equivalent official status. A recent timestamp, an open
-process, or a growing rollout file is not sufficient.
+The latest correctly identified root/user turn has a `task_started` lifecycle
+record and no later terminal lifecycle record. A recent timestamp, an open
+process, a growing rollout file, or an item completion is not sufficient.
 
 ### `READY`
 
@@ -40,9 +42,11 @@ known approval, user-input, or still-active turn is pending. The state means
 that the human can reasonably issue the next instruction; it does not mean that
 the task was successful, correct, or complete in the user's broader sense.
 
-An assistant message, tool result, or `task_complete` record alone does not
-prove current `READY`. The source must establish that the relevant turn is
-terminal and that no newer/pending work supersedes it.
+An assistant message or tool result alone does not prove `READY`. Phase 1B
+established that `task_complete` does establish it when it is the latest
+lifecycle record for a correctly correlated root/user turn; use turn identity
+and source ordinal to reject stale completion. This remains a recorded-turn
+boundary, not proof of task success or a general Desktop live-status contract.
 
 ### `ERROR`
 
@@ -70,7 +74,7 @@ insufficient to establish the current readiness state.
 |---|---|---|---|
 | Official live thread/turn status from the Desktop-owned server, with a proven passive observation contract | `AUTHORITATIVE` | Current active, terminal, waiting, or error state as defined by that contract | Nothing beyond the contract's documented scope |
 | Explicit terminal error/failure from that live source | `AUTHORITATIVE` | `ERROR` for the associated session/turn | Whether a later turn has already superseded it, unless sequence/identity is also checked |
-| Rollout JSONL record type, ordinal, and timestamp | `AUTHORITATIVE` for persisted history | That a record was written to that rollout and its recorded ordering/time | Current Desktop ownership, liveness, `WORKING`, or `READY` |
+| Rollout JSONL root/user `task_started` / `task_complete`, turn ID, ordinal, and timestamp | `AUTHORITATIVE_FOR_RECORDED_TURN_LIFECYCLE` | The latest correctly correlated root/user turn's recorded `WORKING` / `READY` boundary | General Desktop ownership, approval/user-input state, task correctness, or an externally documented live-status contract |
 | Assistant message completion | `STRONG_CORRELATION` | A response/message reached a recorded completion boundary | That no tool, approval, user-input request, or newer turn remains; therefore not `READY` alone |
 | Tool execution start/output | `STRONG_CORRELATION` | Work is/was being performed; an output was recorded | Current activity after the record, terminal readiness, or session success |
 | Command execution start/completion | `STRONG_CORRELATION` | A command item was recorded as active or completed | That the overall Codex turn is finished or ready for another instruction |
@@ -96,13 +100,13 @@ sequence/identity needed to reject stale records. The following rules are
 mandatory:
 
 1. Initialize a discovered session as `UNKNOWN`.
-2. Set `WORKING` only on an authoritative current-active observation, or on a
-   live turn/item-start fact whose contract guarantees that it represents
-   current processing. Strong-correlation activity alone must not do this.
-3. Set `READY` only on an authoritative terminal completion observation that
-   also proves there is no pending active turn or actionable request. An
-   assistant completion, command completion, file change, timestamp gap, or
-   process exit alone must not do this.
+2. Set `WORKING` when the latest deterministically correlated root/user
+   lifecycle record is `task_started`. A strong-correlation activity/item
+   record alone must not do this.
+3. Set `READY` when the latest deterministically correlated root/user
+   lifecycle record is `task_complete`. An assistant completion, command
+   completion, file change, timestamp gap, or process exit alone must not do
+   this. A newer `task_started` supersedes the prior completion immediately.
 4. Set `ERROR` only on an authoritative session/turn failure. Do not convert a
    single failed shell command into session `ERROR` unless the source defines
    it as terminal.
@@ -124,12 +128,12 @@ mandatory:
 Conceptually, the safe transition graph is:
 
 ```text
-             authoritative active
+          latest root/user task_started
         +--------------------------+
         |                          v
   UNKNOWN ---------------------> WORKING
     ^  ^                           |  |
-    |  | loss/ambiguity            |  | authoritative terminal + no pending work
+    |  | loss/ambiguity            |  | latest root/user task_complete
     |  +---------------------------+  v
     |                              READY
     |                                |
@@ -150,10 +154,11 @@ authoritative turn/status must establish the replacement state.
 ## Confidence model
 
 Confidence is evidence metadata for the reducer and diagnostics, not an extra
-user-facing state. Use four evidence classes:
+user-facing state. Use these evidence classes:
 
 | Confidence | Meaning | Allowed state effect |
 |---|---|---|
+| `AUTHORITATIVE_FOR_RECORDED_TURN_LIFECYCLE` | Correctly identified latest root/user lifecycle fact in a rollout | May establish `WORKING` / `READY` only within the validated recorded-turn contract |
 | `AUTHORITATIVE` | Current, correctly identified fact from a supported passive source | May establish or replace any of the four states within its contract |
 | `STRONG_CORRELATION` | Closely associated recorded event, but missing current-state or ownership guarantees | May support explanation/history; may not establish `READY`, `WORKING`, or `ERROR` alone |
 | `HEURISTIC` | Temporal, process, filesystem, or inferred association | Diagnostics/activity hints only; never state-changing |
