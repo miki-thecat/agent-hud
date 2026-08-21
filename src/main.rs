@@ -1,5 +1,6 @@
 mod discovery;
 mod readiness;
+mod watcher;
 
 use std::{env, path::PathBuf, process::ExitCode};
 
@@ -43,6 +44,9 @@ fn main() -> ExitCode {
         }
     };
 
+    if env::args().any(|argument| argument == "--watch") {
+        return watch(database_path);
+    }
     let snapshots = match snapshot_from_paths(&database_path, RECENT_SESSION_LIMIT) {
         Ok(snapshots) => snapshots,
         Err(error) => {
@@ -68,6 +72,46 @@ fn main() -> ExitCode {
             session.recency_at_ms,
             lifecycle
         );
+    }
+    ExitCode::SUCCESS
+}
+
+fn watch(database_path: PathBuf) -> ExitCode {
+    let sessions_dir = database_path
+        .parent()
+        .map(|path| path.join("sessions"))
+        .unwrap_or_else(|| PathBuf::from("sessions"));
+    let mut watcher = match watcher::LiveWatcher::new(database_path, sessions_dir) {
+        Ok(watcher) => watcher,
+        Err(error) => {
+            eprintln!("agent-hud: unable to start watcher: {error}");
+            return ExitCode::FAILURE;
+        }
+    };
+    for line in watcher.initial_lines() {
+        println!("{line}");
+    }
+    let events = match watcher.watch() {
+        Ok(events) => events,
+        Err(error) => {
+            eprintln!("agent-hud: unable to watch persisted state: {error}");
+            return ExitCode::FAILURE;
+        }
+    };
+    for event in events {
+        match event {
+            Ok(event) => match watcher.handle_event(&event) {
+                Ok(lines) => {
+                    for line in lines {
+                        println!("{line}");
+                    }
+                }
+                Err(error) => {
+                    eprintln!("agent-hud: observer degraded; reconciliation required: {error}")
+                }
+            },
+            Err(error) => eprintln!("agent-hud: filesystem observation error: {error}"),
+        }
     }
     ExitCode::SUCCESS
 }

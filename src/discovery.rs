@@ -18,6 +18,7 @@ pub struct SessionSnapshot {
     pub readiness: Readiness,
     pub recency_at_ms: i64,
     pub lifecycle_timestamp: Option<String>,
+    pub rollout_path: PathBuf,
 }
 
 struct Candidate {
@@ -101,10 +102,11 @@ fn parse_rollout(candidate: Candidate) -> Result<SessionSnapshot, DiscoveryError
         })),
         recency_at_ms: candidate.recency_at_ms,
         lifecycle_timestamp,
+        rollout_path: candidate.rollout_path,
     })
 }
 
-fn validate_metadata(metadata: &Value, expected_id: &str) -> Result<(), DiscoveryError> {
+pub(crate) fn validate_metadata(metadata: &Value, expected_id: &str) -> Result<(), DiscoveryError> {
     if metadata.get("type").and_then(Value::as_str) != Some("session_meta") {
         return Err(DiscoveryError::InvalidMetadata);
     }
@@ -123,7 +125,7 @@ fn validate_metadata(metadata: &Value, expected_id: &str) -> Result<(), Discover
     Ok(())
 }
 
-fn lifecycle_record(
+pub(crate) fn lifecycle_record(
     record: &Value,
 ) -> Result<Option<(LifecycleKind, String, Option<String>)>, DiscoveryError> {
     if record.get("type").and_then(Value::as_str) != Some("event_msg") {
