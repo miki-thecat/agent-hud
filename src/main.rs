@@ -107,10 +107,18 @@ fn watch(database_path: PathBuf) -> ExitCode {
                     }
                 }
                 Err(error) => {
-                    eprintln!("agent-hud: observer degraded; reconciliation required: {error}")
+                    eprintln!("agent-hud: observer event failed; recovering: {error}");
+                    for line in watcher.recover() {
+                        println!("{line}");
+                    }
                 }
             },
-            Err(error) => eprintln!("agent-hud: filesystem observation error: {error}"),
+            Err(error) => {
+                eprintln!("agent-hud: filesystem observation error; recovering: {error}");
+                for line in watcher.recover() {
+                    println!("{line}");
+                }
+            }
         }
     }
     ExitCode::SUCCESS

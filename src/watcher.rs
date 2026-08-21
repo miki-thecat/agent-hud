@@ -31,6 +31,7 @@ pub struct IncrementalRollout {
     partial: Vec<u8>,
     active_turn: Option<String>,
     readiness: Readiness,
+    last_lifecycle_timestamp: Option<String>,
 }
 
 impl IncrementalRollout {
@@ -42,6 +43,7 @@ impl IncrementalRollout {
             partial: Vec::new(),
             active_turn: None,
             readiness: Readiness::Unknown,
+            last_lifecycle_timestamp: None,
         };
         reader.read_from_start()?;
         Ok(reader)
@@ -49,6 +51,16 @@ impl IncrementalRollout {
 
     pub fn readiness(&self) -> Readiness {
         self.readiness
+    }
+
+    fn last_lifecycle_timestamp(&self) -> Option<&str> {
+        self.last_lifecycle_timestamp.as_deref()
+    }
+
+    fn fail_closed(&mut self) {
+        self.active_turn = None;
+        self.readiness = Readiness::Unknown;
+        self.last_lifecycle_timestamp = None;
     }
 
     pub fn apply_append(&mut self) -> io::Result<RolloutUpdate> {
@@ -103,11 +115,12 @@ impl IncrementalRollout {
                 .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
             return Ok(());
         }
-        let Some((kind, turn_id, _)) = discovery::lifecycle_record(record)
+        let Some((kind, turn_id, timestamp)) = discovery::lifecycle_record(record)
             .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?
         else {
             return Ok(());
         };
+        self.last_lifecycle_timestamp = timestamp;
         match kind {
             LifecycleKind::TaskStarted => {
                 self.active_turn = Some(turn_id);
@@ -205,10 +218,10 @@ impl LiveWatcher {
                 match session.rollout.apply_append()? {
                     RolloutUpdate::Readiness(readiness) => {
                         session.snapshot.readiness = readiness;
-                        output.push(format!(
-                            "CHANGE {} {}",
-                            session.snapshot.id,
-                            readiness.as_str()
+                        output.push(change_line(
+                            &session.snapshot.id,
+                            readiness,
+                            session.rollout.last_lifecycle_timestamp(),
                         ));
                     }
                     RolloutUpdate::Reconcile => return self.reconcile(),
@@ -217,6 +230,31 @@ impl LiveWatcher {
             }
         }
         Ok(output)
+    }
+
+    /// Rebuild all bounded tracked rollout readers from disk. This recovery
+    /// path handles missed or overflowed notifications; ordinary append
+    /// events remain incremental.
+    pub fn recover(&mut self) -> Vec<String> {
+        match self.reconcile() {
+            Ok(lines) => lines,
+            Err(error) => {
+                eprintln!("agent-hud: recovery failed; failing closed: {error}");
+                self.fail_closed()
+            }
+        }
+    }
+
+    fn fail_closed(&mut self) -> Vec<String> {
+        let mut output = Vec::new();
+        for session in self.tracked.values_mut() {
+            if session.rollout.readiness() != Readiness::Unknown {
+                session.rollout.fail_closed();
+                session.snapshot.readiness = Readiness::Unknown;
+                output.push(format!("CHANGE {} UNKNOWN", session.snapshot.id));
+            }
+        }
+        output
     }
 
     fn reconcile(&mut self) -> io::Result<Vec<String>> {
@@ -233,13 +271,14 @@ impl LiveWatcher {
         for snapshot in snapshots {
             let id = snapshot.id.clone();
             if let Some(mut existing) = self.tracked.remove(&id) {
-                if existing.snapshot.rollout_path != snapshot.rollout_path {
-                    existing.rollout =
-                        IncrementalRollout::open(snapshot.rollout_path.clone(), id.clone())
-                            .map_err(io::Error::other)?;
+                let previous = existing.rollout.readiness();
+                let rollout = IncrementalRollout::open(snapshot.rollout_path.clone(), id.clone())
+                    .map_err(io::Error::other)?;
+                if previous != rollout.readiness() {
+                    output.push(format!("CHANGE {} {}", id, rollout.readiness().as_str()));
                 }
-                existing.snapshot.title = snapshot.title.clone();
-                existing.snapshot.recency_at_ms = snapshot.recency_at_ms;
+                existing.snapshot = snapshot;
+                existing.rollout = rollout;
                 next.insert(id, existing);
             } else {
                 let rollout = IncrementalRollout::open(snapshot.rollout_path.clone(), id.clone())
@@ -264,10 +303,22 @@ fn line_for(session: &TrackedSession) -> String {
     )
 }
 
+fn change_line(id: &str, readiness: Readiness, persisted_at: Option<&str>) -> String {
+    let observed_at_ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |duration| duration.as_millis());
+    format!(
+        "CHANGE {id} {} persisted_at={} observed_at_unix_ms={observed_at_ms}",
+        readiness.as_str(),
+        persisted_at.unwrap_or("-")
+    )
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{IncrementalRollout, RolloutUpdate};
+    use super::{IncrementalRollout, LiveWatcher, RolloutUpdate};
     use crate::readiness::Readiness;
+    use rusqlite::Connection;
     use std::{fs, io::Write};
 
     fn rollout(path: &std::path::Path, id: &str) {
@@ -277,6 +328,39 @@ mod tests {
         format!(
             "{{\"timestamp\":\"2026-01-01T00:00:00Z\",\"type\":\"event_msg\",\"payload\":{{\"type\":\"{kind}\",\"turn_id\":\"{turn}\"}}}}\n"
         )
+    }
+
+    fn setup_live_watcher(name: &str, contents: &str) -> (std::path::PathBuf, LiveWatcher) {
+        let root =
+            std::env::temp_dir().join(format!("agent-hud-live-{name}-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(&root).unwrap();
+        let database = root.join("state_5.sqlite");
+        let rollout_path = root.join("rollout.jsonl");
+        fs::write(&rollout_path, contents).unwrap();
+        let connection = Connection::open(&database).unwrap();
+        connection
+            .execute_batch(
+                "CREATE TABLE threads (
+                    id TEXT, title TEXT, rollout_path TEXT,
+                    recency_at_ms INTEGER, updated_at_ms INTEGER,
+                    thread_source TEXT, archived INTEGER
+                );",
+            )
+            .unwrap();
+        connection
+            .execute(
+                "INSERT INTO threads VALUES ('root', 'Synthetic', ?1, 1, 1, 'user', 0)",
+                [rollout_path.to_string_lossy().as_ref()],
+            )
+            .unwrap();
+        drop(connection);
+        let watcher = LiveWatcher::new(database, root.join("sessions")).unwrap();
+        (root, watcher)
+    }
+
+    fn metadata() -> String {
+        "{\"type\":\"session_meta\",\"payload\":{\"id\":\"root\",\"session_id\":\"root\",\"thread_source\":\"user\"}}\n".into()
     }
     fn reader(name: &str) -> (std::path::PathBuf, IncrementalRollout) {
         let path =
@@ -377,5 +461,43 @@ mod tests {
         fs::write(&path, "").unwrap();
         assert_eq!(reader.apply_append().unwrap(), RolloutUpdate::Reconcile);
         let _ = fs::remove_file(path);
+    }
+
+    #[test]
+    fn reconciliation_reopens_tracked_rollout_after_missed_append() {
+        let (root, mut watcher) = setup_live_watcher(
+            "missed-append",
+            &format!("{}{}", metadata(), event("task_started", "one")),
+        );
+        assert_eq!(watcher.initial_lines(), vec!["INITIAL root WORKING"]);
+        let rollout_path = root.join("rollout.jsonl");
+        let mut file = fs::OpenOptions::new()
+            .append(true)
+            .open(&rollout_path)
+            .unwrap();
+        write!(file, "{}", event("task_complete", "one")).unwrap();
+
+        assert_eq!(watcher.reconcile().unwrap(), vec!["CHANGE root READY"]);
+        assert!(watcher.reconcile().unwrap().is_empty());
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn failed_recovery_degrades_tracked_readiness_to_unknown() {
+        let (root, mut watcher) = setup_live_watcher(
+            "error-recovery",
+            &format!(
+                "{}{}{}",
+                metadata(),
+                event("task_started", "one"),
+                event("task_complete", "one")
+            ),
+        );
+        assert_eq!(watcher.initial_lines(), vec!["INITIAL root READY"]);
+        fs::remove_file(root.join("state_5.sqlite")).unwrap();
+
+        assert_eq!(watcher.recover(), vec!["CHANGE root UNKNOWN"]);
+        assert_eq!(watcher.initial_lines(), vec!["INITIAL root UNKNOWN"]);
+        fs::remove_dir_all(root).unwrap();
     }
 }
