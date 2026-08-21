@@ -11,6 +11,7 @@ use serde_json::Value;
 
 use crate::{
     discovery::{self, SessionSnapshot},
+    model::SessionChange,
     readiness::{LifecycleKind, Readiness},
 };
 
@@ -173,8 +174,19 @@ impl LiveWatcher {
         })
     }
 
-    pub fn initial_lines(&self) -> Vec<String> {
-        self.tracked.values().map(line_for).collect()
+    pub fn initial_changes(&self) -> Vec<SessionChange> {
+        vec![SessionChange::Snapshot(
+            self.tracked
+                .values()
+                .map(|session| (&session.snapshot).into())
+                .collect(),
+        )]
+    }
+
+    pub fn degrade(&mut self) -> Vec<SessionChange> {
+        let mut changes = self.fail_closed();
+        changes.push(SessionChange::ObservationTerminated);
+        changes
     }
 
     pub fn watch(&mut self) -> io::Result<Receiver<notify::Result<Event>>> {
@@ -195,7 +207,7 @@ impl LiveWatcher {
         Ok(rx)
     }
 
-    pub fn handle_event(&mut self, event: &Event) -> io::Result<Vec<String>> {
+    pub fn handle_event(&mut self, event: &Event) -> io::Result<Vec<SessionChange>> {
         if matches!(event.kind, EventKind::Other)
             || matches!(event.kind, EventKind::Create(_) | EventKind::Remove(_))
             || event.paths.iter().any(|path| {
@@ -218,11 +230,8 @@ impl LiveWatcher {
                 match session.rollout.apply_append()? {
                     RolloutUpdate::Readiness(readiness) => {
                         session.snapshot.readiness = readiness;
-                        output.push(change_line(
-                            &session.snapshot.id,
-                            readiness,
-                            session.rollout.last_lifecycle_timestamp(),
-                        ));
+                        let _ = session.rollout.last_lifecycle_timestamp();
+                        output.push(SessionChange::Updated((&session.snapshot).into()));
                     }
                     RolloutUpdate::Reconcile => return self.reconcile(),
                     RolloutUpdate::NoChange => {}
@@ -235,29 +244,31 @@ impl LiveWatcher {
     /// Rebuild all bounded tracked rollout readers from disk. This recovery
     /// path handles missed or overflowed notifications; ordinary append
     /// events remain incremental.
-    pub fn recover(&mut self) -> Vec<String> {
+    pub fn recover(&mut self) -> Vec<SessionChange> {
         match self.reconcile() {
             Ok(lines) => lines,
             Err(error) => {
                 eprintln!("agent-hud: recovery failed; failing closed: {error}");
-                self.fail_closed()
+                self.degrade()
             }
         }
     }
 
-    fn fail_closed(&mut self) -> Vec<String> {
+    fn fail_closed(&mut self) -> Vec<SessionChange> {
         let mut output = Vec::new();
         for session in self.tracked.values_mut() {
             if session.rollout.readiness() != Readiness::Unknown {
                 session.rollout.fail_closed();
                 session.snapshot.readiness = Readiness::Unknown;
-                output.push(format!("CHANGE {} UNKNOWN", session.snapshot.id));
+                output.push(SessionChange::ObservationDegraded {
+                    id: session.snapshot.id.clone(),
+                });
             }
         }
         output
     }
 
-    fn reconcile(&mut self) -> io::Result<Vec<String>> {
+    fn reconcile(&mut self) -> io::Result<Vec<SessionChange>> {
         let snapshots =
             discovery::snapshot_from_paths(&self.database_path, discovery::RECENT_SESSION_LIMIT)
                 .map_err(io::Error::other)?;
@@ -275,7 +286,7 @@ impl LiveWatcher {
                 let rollout = IncrementalRollout::open(snapshot.rollout_path.clone(), id.clone())
                     .map_err(io::Error::other)?;
                 if previous != rollout.readiness() {
-                    output.push(format!("CHANGE {} {}", id, rollout.readiness().as_str()));
+                    output.push(SessionChange::Updated((&snapshot).into()));
                 }
                 existing.snapshot = snapshot;
                 existing.rollout = rollout;
@@ -283,40 +294,31 @@ impl LiveWatcher {
             } else {
                 let rollout = IncrementalRollout::open(snapshot.rollout_path.clone(), id.clone())
                     .map_err(io::Error::other)?;
-                output.push(format!("CHANGE {} {}", id, rollout.readiness().as_str()));
+                output.push(SessionChange::Updated((&snapshot).into()));
                 next.insert(id, TrackedSession { snapshot, rollout });
             }
         }
         for removed in previous_ids.difference(&next.keys().cloned().collect()) {
-            output.push(format!("CHANGE {removed} REMOVED"));
+            output.push(SessionChange::Removed(removed.clone()));
         }
         self.tracked = next;
-        Ok(output)
+        if output.is_empty() {
+            Ok(output)
+        } else {
+            Ok(vec![SessionChange::Snapshot(
+                self.tracked
+                    .values()
+                    .map(|session| (&session.snapshot).into())
+                    .collect(),
+            )])
+        }
     }
-}
-
-fn line_for(session: &TrackedSession) -> String {
-    format!(
-        "INITIAL {} {}",
-        session.snapshot.id,
-        session.rollout.readiness().as_str()
-    )
-}
-
-fn change_line(id: &str, readiness: Readiness, persisted_at: Option<&str>) -> String {
-    let observed_at_ms = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map_or(0, |duration| duration.as_millis());
-    format!(
-        "CHANGE {id} {} persisted_at={} observed_at_unix_ms={observed_at_ms}",
-        readiness.as_str(),
-        persisted_at.unwrap_or("-")
-    )
 }
 
 #[cfg(test)]
 mod tests {
     use super::{IncrementalRollout, LiveWatcher, RolloutUpdate};
+    use crate::model::SessionChange;
     use crate::readiness::Readiness;
     use rusqlite::Connection;
     use std::{fs, io::Write};
@@ -469,7 +471,9 @@ mod tests {
             "missed-append",
             &format!("{}{}", metadata(), event("task_started", "one")),
         );
-        assert_eq!(watcher.initial_lines(), vec!["INITIAL root WORKING"]);
+        assert!(
+            matches!(watcher.initial_changes().as_slice(), [SessionChange::Snapshot(items)] if items[0].readiness == Readiness::Working)
+        );
         let rollout_path = root.join("rollout.jsonl");
         let mut file = fs::OpenOptions::new()
             .append(true)
@@ -477,7 +481,9 @@ mod tests {
             .unwrap();
         write!(file, "{}", event("task_complete", "one")).unwrap();
 
-        assert_eq!(watcher.reconcile().unwrap(), vec!["CHANGE root READY"]);
+        assert!(
+            matches!(watcher.reconcile().unwrap().as_slice(), [SessionChange::Snapshot(items)] if items[0].readiness == Readiness::Ready)
+        );
         assert!(watcher.reconcile().unwrap().is_empty());
         fs::remove_dir_all(root).unwrap();
     }
@@ -493,11 +499,19 @@ mod tests {
                 event("task_complete", "one")
             ),
         );
-        assert_eq!(watcher.initial_lines(), vec!["INITIAL root READY"]);
+        assert!(
+            matches!(watcher.initial_changes().as_slice(), [SessionChange::Snapshot(items)] if items[0].readiness == Readiness::Ready)
+        );
         fs::remove_file(root.join("state_5.sqlite")).unwrap();
 
-        assert_eq!(watcher.recover(), vec!["CHANGE root UNKNOWN"]);
-        assert_eq!(watcher.initial_lines(), vec!["INITIAL root UNKNOWN"]);
+        assert!(matches!(
+            watcher.recover().as_slice(),
+            [SessionChange::ObservationDegraded { id }, SessionChange::ObservationTerminated]
+                if id == "root"
+        ));
+        assert!(
+            matches!(watcher.initial_changes().as_slice(), [SessionChange::Snapshot(items)] if items[0].readiness == Readiness::Unknown)
+        );
         fs::remove_dir_all(root).unwrap();
     }
 }

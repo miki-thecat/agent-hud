@@ -60,6 +60,12 @@ Windows-first candidate stack:
 - memory-only session state,
 - standard-library threading/channels unless measured complexity requires more.
 
+The focused `windows-window` and `windows-canvas` crates are currently consumed
+from the Microsoft `windows-rs` repository revision selected by Cargo because
+the documented `0.100` examples are not published as usable crates.io releases
+in the current installation. The API is the official Microsoft stack; the git
+source can move to a released version once those crates are published.
+
 This is deliberately thinner than a browser-backed desktop stack.
 
 Do not add Electron, Tauri/WebView, Node.js, React, or another browser runtime merely for UI convenience without an accepted architecture change backed by evidence that the native path is the wrong lifecycle trade-off.
@@ -159,6 +165,11 @@ Avoid:
 - repainting for every streaming token,
 - expensive visual effects,
 - unnecessary retained off-screen surfaces.
+
+The standalone canvas host applies the current per-monitor DPI to the swap
+chain and composition scale on DPI messages and recreates the focused
+`GpuDevice`/swap chain when `windows-canvas` reports device loss. This keeps the
+native lifecycle local to the platform shell without adding a UI framework.
 
 For latest-message streaming, coalesce deltas or prefer meaningful completion boundaries rather than painting every token.
 
