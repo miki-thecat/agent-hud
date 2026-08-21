@@ -7,7 +7,10 @@ use std::{
 };
 
 use windows_canvas::*;
-use windows_sys::Win32::UI::WindowsAndMessaging::{PostMessageW, WM_APP, WM_DPICHANGED};
+use windows_sys::Win32::{
+    UI::HiDpi::GetDpiForWindow,
+    UI::WindowsAndMessaging::{PostMessageW, WM_APP, WM_DPICHANGED},
+};
 use windows_window::*;
 
 use crate::{
@@ -37,6 +40,12 @@ fn run_window(database_path: PathBuf) -> windows_canvas::Result<()> {
             None
         })
         .create()?;
+    let initial_dpi = unsafe { GetDpiForWindow(window.hwnd() as _) };
+    requested_dpi.set(if initial_dpi == 0 {
+        96.0
+    } else {
+        initial_dpi as f32
+    });
     let hwnd = window.hwnd() as usize;
     let (tx, rx) = mpsc::channel();
     let sessions_dir = database_path
@@ -92,6 +101,7 @@ fn run_window(database_path: PathBuf) -> windows_canvas::Result<()> {
     )?;
     let mut state = ApplicationState::default();
     let mut applied_dpi = requested_dpi.get();
+    let mut retry_after_recreate = false;
     let mut dirty = true;
     run_with(|| {
         while let Ok(change) = rx.try_recv() {
@@ -108,14 +118,20 @@ fn run_window(database_path: PathBuf) -> windows_canvas::Result<()> {
             dirty = true;
         }
         chain.set_dpi(dpi, dpi);
-        let scale = dpi / 96.0;
-        chain.set_composition_scale(scale, scale);
+        // This is a raw HWND swap chain, not a composition surface. Keep the
+        // composition transform at identity; set_dpi carries the monitor DPI.
+        chain.set_composition_scale(1.0, 1.0);
         if !dirty {
             return Ok(false);
         }
         match draw(&mut chain, &state) {
-            Ok(true) => {}
+            Ok(true) => {
+                retry_after_recreate = false;
+            }
             Ok(false) => {
+                if retry_after_recreate {
+                    return Err(device_lost_error());
+                }
                 device = GpuDevice::new_or_warp()?;
                 chain = create_chain(
                     &device,
@@ -125,8 +141,13 @@ fn run_window(database_path: PathBuf) -> windows_canvas::Result<()> {
                     requested_dpi.get(),
                 )?;
                 applied_dpi = requested_dpi.get();
+                retry_after_recreate = true;
+                return Ok(true);
             }
             Err(error) if is_device_lost(error.code()) || chain.is_device_lost() => {
+                if retry_after_recreate {
+                    return Err(device_lost_error());
+                }
                 device = GpuDevice::new_or_warp()?;
                 chain = create_chain(
                     &device,
@@ -136,6 +157,8 @@ fn run_window(database_path: PathBuf) -> windows_canvas::Result<()> {
                     requested_dpi.get(),
                 )?;
                 applied_dpi = requested_dpi.get();
+                retry_after_recreate = true;
+                return Ok(true);
             }
             Err(error) => return Err(error),
         }
