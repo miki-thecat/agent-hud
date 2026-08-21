@@ -246,9 +246,10 @@ fn draw(chain: &mut SwapChain, state: &ApplicationState) -> windows_canvas::Resu
         &Rect::new(24.0, 52.0, width - 24.0, 76.0),
         &brush,
     );
-    let row_format = TextFormat::new("Segoe UI", 15.0)?;
+    let project_format = TextFormat::new_bold("Segoe UI", 15.0)?;
+    let row_format = TextFormat::new("Segoe UI", 13.0)?;
     let status_format = TextFormat::new_bold("Segoe UI", 12.0)?;
-    let status_left = (width - 136.0).clamp(0.0, (width - 112.0).max(0.0));
+    let row_layout = row_layout(width);
     if state.observation_degraded {
         draw_status_badge(
             &session,
@@ -256,35 +257,46 @@ fn draw(chain: &mut SwapChain, state: &ApplicationState) -> windows_canvas::Resu
             &status_brush,
             Readiness::Unknown,
             false,
-            status_left,
+            row_layout.badge,
             20.0,
         );
     }
     for (index, item) in state.sessions().iter().enumerate() {
         let top = 92.0 + index as f32 * 30.0;
-        let label = item
+        let title = item
             .title
             .as_deref()
             .filter(|title| !title.is_empty())
             .unwrap_or("(untitled)");
-        let label: String = label
+        let title: String = title
             .chars()
             .map(|c| if c.is_control() { ' ' } else { c })
             .take(64)
             .collect();
-        session.draw_text(
-            &label,
-            &row_format,
-            &Rect::new(28.0, top, status_left - 16.0, top + 28.0),
-            &brush,
-        );
+        if let Some(project_rect) = row_layout.project {
+            let project = item.project_label.as_deref().unwrap_or_default();
+            session.draw_text(
+                project,
+                &project_format,
+                &Rect::new(project_rect.left, top, project_rect.right, top + 28.0),
+                &brush,
+            );
+        }
+        if let Some(title_rect) = row_layout.title {
+            session.draw_text(
+                &title,
+                &row_format,
+                &Rect::new(title_rect.left, top + 2.0, title_rect.right, top + 26.0),
+                &brush,
+            );
+        }
         draw_status_badge(
             &session,
             &status_format,
             &status_brush,
             item.readiness,
             item.needs_attention,
-            status_left,
+            row_layout.badge,
             top + 4.0,
         );
         if top + 30.0 > height {
@@ -295,13 +307,49 @@ fn draw(chain: &mut SwapChain, state: &ApplicationState) -> windows_canvas::Resu
     chain.present()
 }
 
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct TextRect {
+    left: f32,
+    right: f32,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct RowLayout {
+    badge: TextRect,
+    project: Option<TextRect>,
+    title: Option<TextRect>,
+}
+
+fn row_layout(width: f32) -> RowLayout {
+    let width = width.max(0.0);
+    let badge_width = width.min(112.0);
+    let badge_left = width - badge_width;
+    let text_right = badge_left - 16.0;
+    let project = (text_right > 28.0).then_some(TextRect {
+        left: 28.0,
+        right: text_right.min(150.0),
+    });
+    let title = (text_right > 158.0).then_some(TextRect {
+        left: 158.0,
+        right: text_right,
+    });
+    RowLayout {
+        badge: TextRect {
+            left: badge_left,
+            right: badge_left + badge_width,
+        },
+        project,
+        title,
+    }
+}
+
 fn draw_status_badge(
     session: &DrawingSession<'_>,
     format: &TextFormat,
     brush: &Brush,
     readiness: Readiness,
     needs_attention: bool,
-    left: f32,
+    badge: TextRect,
     top: f32,
 ) {
     let (background, foreground) = if readiness == Readiness::Ready && needs_attention {
@@ -327,14 +375,19 @@ fn draw_status_badge(
     };
     brush.set_color(background);
     session.fill_rounded_rect(
-        &RoundedRect::uniform(Rect::new(left, top, left + 112.0, top + 24.0), 7.0),
+        &RoundedRect::uniform(Rect::new(badge.left, top, badge.right, top + 24.0), 7.0),
         brush,
     );
     brush.set_color(foreground);
     session.draw_text(
         readiness.as_str(),
         format,
-        &Rect::new(left + 10.0, top + 3.0, left + 106.0, top + 22.0),
+        &Rect::new(
+            badge.left + 10.0,
+            top + 3.0,
+            (badge.right - 6.0).max(badge.left + 10.0),
+            top + 22.0,
+        ),
         brush,
     );
 }
@@ -361,7 +414,7 @@ fn session_at_y(state: &ApplicationState, y: f32) -> Option<String> {
 
 #[cfg(test)]
 mod tests {
-    use super::{client_y_px_to_dips, session_at_client_y};
+    use super::{TextRect, client_y_px_to_dips, row_layout, session_at_client_y};
     use crate::{
         model::{ApplicationState, SessionChange, SessionViewModel},
         readiness::Readiness,
@@ -371,6 +424,7 @@ mod tests {
         SessionViewModel {
             id: id.into(),
             title: None,
+            project_label: None,
             readiness: Readiness::Ready,
             needs_attention: false,
             recency_at_ms,
@@ -405,6 +459,60 @@ mod tests {
         assert_eq!(
             session_at_client_y(&state, 183.0, 144.0).as_deref(),
             Some("second")
+        );
+    }
+
+    #[test]
+    fn normal_width_keeps_project_title_and_badge_separated() {
+        let layout = row_layout(620.0);
+
+        assert_eq!(
+            layout.badge,
+            TextRect {
+                left: 508.0,
+                right: 620.0
+            }
+        );
+        assert_eq!(
+            layout.project,
+            Some(TextRect {
+                left: 28.0,
+                right: 150.0
+            })
+        );
+        assert_eq!(
+            layout.title,
+            Some(TextRect {
+                left: 158.0,
+                right: 492.0
+            })
+        );
+        assert!(layout.title.unwrap().right < layout.badge.left);
+    }
+
+    #[test]
+    fn narrow_width_omits_text_before_it_can_invert_or_overlap_badge() {
+        let layout = row_layout(160.0);
+
+        assert_eq!(
+            layout.badge,
+            TextRect {
+                left: 48.0,
+                right: 160.0
+            }
+        );
+        assert_eq!(
+            layout.project,
+            Some(TextRect {
+                left: 28.0,
+                right: 32.0
+            })
+        );
+        assert_eq!(layout.title, None);
+        assert!(
+            layout
+                .project
+                .is_none_or(|rect| rect.right <= layout.badge.left)
         );
     }
 }

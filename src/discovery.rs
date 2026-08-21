@@ -15,6 +15,8 @@ pub const RECENT_SESSION_LIMIT: usize = 20;
 pub struct SessionSnapshot {
     pub id: String,
     pub title: Option<String>,
+    pub cwd: Option<String>,
+    pub project_label: Option<String>,
     pub readiness: Readiness,
     pub recency_at_ms: i64,
     pub lifecycle_timestamp: Option<String>,
@@ -24,6 +26,7 @@ pub struct SessionSnapshot {
 struct Candidate {
     id: String,
     title: Option<String>,
+    cwd: Option<String>,
     rollout_path: PathBuf,
     recency_at_ms: i64,
 }
@@ -48,7 +51,7 @@ fn read_candidates(
 ) -> Result<Vec<Candidate>, DiscoveryError> {
     let mut statement = connection
         .prepare(
-            "SELECT id, title, rollout_path, COALESCE(recency_at_ms, updated_at_ms, 0) \
+            "SELECT id, title, cwd, rollout_path, COALESCE(recency_at_ms, updated_at_ms, 0) \
              FROM threads \
              WHERE thread_source = 'user' AND archived = 0 \
                AND TRIM(COALESCE(id, '')) <> '' \
@@ -62,8 +65,9 @@ fn read_candidates(
             Ok(Candidate {
                 id: row.get(0)?,
                 title: row.get(1)?,
-                rollout_path: PathBuf::from(row.get::<_, String>(2)?),
-                recency_at_ms: row.get(3)?,
+                cwd: row.get(2)?,
+                rollout_path: PathBuf::from(row.get::<_, String>(3)?),
+                recency_at_ms: row.get(4)?,
             })
         })
         .map_err(DiscoveryError::Database)?;
@@ -96,6 +100,8 @@ fn parse_rollout(candidate: Candidate) -> Result<SessionSnapshot, DiscoveryError
     Ok(SessionSnapshot {
         id: candidate.id,
         title: candidate.title.filter(|title| !title.trim().is_empty()),
+        project_label: project_label(candidate.cwd.as_deref()),
+        cwd: candidate.cwd,
         readiness: reduce_lifecycle(events.iter().map(|(kind, turn_id)| LifecycleEvent {
             kind: *kind,
             turn_id,
@@ -104,6 +110,18 @@ fn parse_rollout(candidate: Candidate) -> Result<SessionSnapshot, DiscoveryError
         lifecycle_timestamp,
         rollout_path: candidate.rollout_path,
     })
+}
+
+pub fn project_label(cwd: Option<&str>) -> Option<String> {
+    let path = cwd?.trim().trim_end_matches(['\\', '/']);
+    if path.is_empty() || path.ends_with(':') {
+        return None;
+    }
+    let component = path.rsplit(['\\', '/']).next()?.trim();
+    if component.is_empty() || component == "." || component == ".." {
+        return None;
+    }
+    Some(component.to_owned())
 }
 
 pub(crate) fn validate_metadata(metadata: &Value, expected_id: &str) -> Result<(), DiscoveryError> {
@@ -185,7 +203,7 @@ mod tests {
 
     use rusqlite::Connection;
 
-    use super::{RECENT_SESSION_LIMIT, snapshot_from_paths};
+    use super::{RECENT_SESSION_LIMIT, project_label, snapshot_from_paths};
     use crate::readiness::Readiness;
 
     fn workspace(name: &str) -> std::path::PathBuf {
@@ -202,6 +220,7 @@ mod tests {
                 "CREATE TABLE threads (
                 id TEXT,
                 title TEXT,
+                cwd TEXT,
                 rollout_path TEXT,
                 recency_at_ms INTEGER,
                 updated_at_ms INTEGER,
@@ -228,7 +247,7 @@ mod tests {
     fn insert(connection: &Connection, id: &str, path: &Path, recency: i64, source: &str) {
         connection
             .execute(
-                "INSERT INTO threads VALUES (?1, ?2, ?3, ?4, ?4, ?5, 0)",
+                "INSERT INTO threads VALUES (?1, ?2, 'C:\\Users\\kanat\\dev\\agent-hud', ?3, ?4, ?4, ?5, 0)",
                 (
                     id,
                     "Synthetic session",
@@ -238,6 +257,25 @@ mod tests {
                 ),
             )
             .unwrap();
+    }
+
+    #[test]
+    fn project_label_uses_final_windows_component_and_handles_trailing_separator() {
+        assert_eq!(
+            project_label(Some(r"C:\Users\kanat\dev\agent-hud")),
+            Some("agent-hud".into())
+        );
+        assert_eq!(
+            project_label(Some(r"C:\Users\kanat\dev\agent-hud\\")),
+            Some("agent-hud".into())
+        );
+    }
+
+    #[test]
+    fn missing_or_empty_project_context_is_optional() {
+        assert_eq!(project_label(None), None);
+        assert_eq!(project_label(Some("   ")), None);
+        assert_eq!(project_label(Some(r"C:\")), None);
     }
 
     #[test]
@@ -263,6 +301,7 @@ mod tests {
 
         let snapshots = snapshot_from_paths(&database, RECENT_SESSION_LIMIT).unwrap();
         assert_eq!(snapshots[0].readiness, Readiness::Working);
+        assert_eq!(snapshots[0].project_label.as_deref(), Some("agent-hud"));
         fs::remove_dir_all(root).unwrap();
     }
 
