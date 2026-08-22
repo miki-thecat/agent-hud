@@ -274,7 +274,11 @@ fn draw(chain: &mut SwapChain, state: &ApplicationState) -> windows_canvas::Resu
             .take(64)
             .collect();
         if let Some(project_rect) = row_layout.project {
-            let project = item.project_label.as_deref().unwrap_or_default();
+            let project = item
+                .project_identity
+                .as_ref()
+                .map(|project| project.normalized_name.as_str())
+                .unwrap_or_default();
             session.draw_text(
                 project,
                 &project_format,
@@ -425,7 +429,7 @@ mod tests {
             id: id.into(),
             title: None,
             latest_result: None,
-            project_label: None,
+            project_identity: None,
             changed_files: Vec::new(),
             readiness: Readiness::Ready,
             needs_attention: false,

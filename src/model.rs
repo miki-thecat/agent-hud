@@ -1,5 +1,5 @@
 use crate::verification::VerificationEvidence;
-use crate::{discovery::SessionSnapshot, readiness::Readiness};
+use crate::{discovery::SessionSnapshot, project::ProjectIdentity, readiness::Readiness};
 
 pub const WORKFLOW_EVENT_LIMIT: usize = 32;
 
@@ -24,7 +24,7 @@ pub struct WorkflowEvent {
 pub struct SessionViewModel {
     pub id: String,
     pub title: Option<String>,
-    pub project_label: Option<String>,
+    pub project_identity: Option<ProjectIdentity>,
     pub readiness: Readiness,
     pub latest_result: Option<String>,
     pub needs_attention: bool,
@@ -38,7 +38,7 @@ impl From<&SessionSnapshot> for SessionViewModel {
         Self {
             id: snapshot.id.clone(),
             title: snapshot.title.clone(),
-            project_label: snapshot.project_label.clone(),
+            project_identity: snapshot.project_identity.clone(),
             readiness: snapshot.readiness,
             latest_result: snapshot.latest_result.clone(),
             needs_attention: false,
@@ -167,7 +167,7 @@ fn session_ordering(left: &SessionViewModel, right: &SessionViewModel) -> std::c
 #[cfg(test)]
 mod tests {
     use super::{ApplicationState, SessionChange, SessionViewModel};
-    use crate::{discovery::SessionSnapshot, readiness::Readiness};
+    use crate::{discovery::SessionSnapshot, project::ProjectIdentity, readiness::Readiness};
     use std::path::PathBuf;
 
     fn session(id: &str, readiness: Readiness, recency_at_ms: i64) -> SessionViewModel {
@@ -175,7 +175,7 @@ mod tests {
             id: id.into(),
             title: None,
             latest_result: None,
-            project_label: None,
+            project_identity: None,
             changed_files: Vec::new(),
             readiness,
             needs_attention: false,
@@ -208,7 +208,11 @@ mod tests {
             id: "a".into(),
             title: Some("A task".into()),
             cwd: Some(r"C:\Users\kanat\dev\agent-hud".into()),
-            project_label: Some("agent-hud".into()),
+            project_identity: Some(ProjectIdentity {
+                normalized_name: "agent-hud".into(),
+                root_path: None,
+                repository_identity: None,
+            }),
             readiness: Readiness::Ready,
             latest_result: Some("completed result".into()),
             recency_at_ms: 1,
@@ -222,7 +226,13 @@ mod tests {
         state.apply(SessionChange::Snapshot(vec![(&snapshot).into()]));
 
         let session = &state.sessions()[0];
-        assert_eq!(session.project_label.as_deref(), Some("agent-hud"));
+        assert_eq!(
+            session
+                .project_identity
+                .as_ref()
+                .map(|project| project.normalized_name.as_str()),
+            Some("agent-hud")
+        );
         assert_eq!(session.readiness, Readiness::Ready);
         assert_eq!(session.latest_result.as_deref(), Some("completed result"));
         assert!(!session.needs_attention);
