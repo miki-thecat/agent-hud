@@ -1,5 +1,6 @@
 pub mod attention;
 mod discovery;
+pub mod extensions;
 mod model;
 mod project;
 mod readiness;
