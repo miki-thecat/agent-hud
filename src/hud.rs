@@ -20,11 +20,13 @@ use crate::{
     model::{ApplicationState, SessionChange},
     project::ProjectIdentity,
     readiness::Readiness,
+    result_bundle::ProjectResultBundle,
     watcher::LiveWatcher,
 };
 
 const WATCHER_UPDATE: u32 = WM_APP + 1;
 const COPY_BUTTON_WIDTH: f32 = 86.0;
+const PROJECT_COPY_BUTTON_WIDTH: f32 = 112.0;
 const CARD_GAP: f32 = 10.0;
 const CARD_HEIGHT: f32 = 122.0;
 const MAX_RESULT_CHARS: usize = 180;
@@ -150,6 +152,10 @@ fn run_window(database_path: PathBuf, config: Config) -> windows_canvas::Result<
                         .find(|session| session.id == id)
                         .and_then(copy_payload)
                         .is_some_and(copy_to_clipboard);
+                }
+                Some(HitTarget::CopyProject(identity)) => {
+                    dirty |= project_result_payload(&identity, &state)
+                        .is_some_and(|payload| copy_to_clipboard(&payload));
                 }
                 None => {}
             }
@@ -308,6 +314,7 @@ fn draw(
             .identity
             .map(|identity| identity.normalized_name.as_str())
             .unwrap_or("(unknown project)");
+        let header_layout = project_header_layout(width, top);
         session.draw_text(
             &format!(
                 "{} {} ({})",
@@ -316,9 +323,22 @@ fn draw(
                 group.sessions.len()
             ),
             &project_format,
-            &Rect::new(28.0, top, width - 24.0, top + 28.0),
+            &header_layout.title,
             &brush,
         );
+        if group
+            .identity
+            .and_then(|identity| project_result_payload(identity, state))
+            .is_some()
+        {
+            draw_button(
+                &session,
+                &button_format,
+                header_layout.copy_button,
+                "Copy results",
+                &brush,
+            );
+        }
         top += 28.0;
         if collapsed {
             continue;
@@ -428,6 +448,26 @@ struct CardLayout {
     files: Rect,
     verification: Rect,
     copy_button: Rect,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct ProjectHeaderLayout {
+    title: Rect,
+    copy_button: Rect,
+}
+
+fn project_header_layout(width: f32, top: f32) -> ProjectHeaderLayout {
+    let right = width.max(220.0) - 16.0;
+    let copy_button = Rect::new(
+        right - PROJECT_COPY_BUTTON_WIDTH,
+        top + 3.0,
+        right,
+        top + 25.0,
+    );
+    ProjectHeaderLayout {
+        title: Rect::new(28.0, top, copy_button.left - 8.0, top + 28.0),
+        copy_button,
+    }
 }
 
 fn card_layout(width: f32, top: f32) -> CardLayout {
@@ -616,6 +656,11 @@ fn copy_payload(session: &crate::model::SessionViewModel) -> Option<&str> {
     session.latest_result.as_deref()
 }
 
+fn project_result_payload(identity: &ProjectIdentity, state: &ApplicationState) -> Option<String> {
+    let bundle = ProjectResultBundle::from_sessions(identity, state.sessions());
+    matches!(&bundle, ProjectResultBundle::Available { .. }).then(|| bundle.format())
+}
+
 #[cfg(test)]
 fn client_y_px_to_dips(client_y_px: f32, dpi: f32) -> f32 {
     client_y_px * 96.0 / dpi.max(1.0)
@@ -674,6 +719,7 @@ enum HitTarget {
     Project(Option<ProjectIdentity>),
     Session(String),
     CopyResult(String),
+    CopyProject(ProjectIdentity),
 }
 
 fn hit_test(
@@ -685,6 +731,16 @@ fn hit_test(
 ) -> Option<HitTarget> {
     let mut top = 92.0;
     for group in project_groups(state) {
+        let header_layout = project_header_layout(width, top);
+        if let Some(identity) = group.identity
+            && project_result_payload(identity, state).is_some()
+            && x >= header_layout.copy_button.left
+            && x < header_layout.copy_button.right
+            && y >= header_layout.copy_button.top
+            && y < header_layout.copy_button.bottom
+        {
+            return Some(HitTarget::CopyProject(identity.clone()));
+        }
         if y >= top && y < top + 28.0 {
             return Some(HitTarget::Project(group.identity.cloned()));
         }
@@ -715,7 +771,7 @@ fn hit_test(
 mod tests {
     use super::{
         HitTarget, TextRect, ViewState, card_layout, changed_files_preview, client_y_px_to_dips,
-        copy_payload, hit_test, preview, row_layout,
+        copy_payload, hit_test, preview, project_header_layout, project_result_payload, row_layout,
     };
     use crate::{
         model::{ApplicationState, SessionChange, SessionViewModel},
@@ -752,6 +808,14 @@ mod tests {
                 outcome: VerificationOutcome::Passed,
             }),
             ..session(id, 1)
+        }
+    }
+
+    fn project(name: &str, root: &str, repository: Option<&str>) -> ProjectIdentity {
+        ProjectIdentity {
+            normalized_name: name.into(),
+            root_path: Some(root.into()),
+            repository_identity: repository.map(str::to_owned),
         }
     }
 
@@ -835,6 +899,68 @@ mod tests {
             Some(HitTarget::Project(Some(identity))) if identity == project
         ));
         assert!(hit_test(&state, &view, 0.0, 120.0, 620.0).is_none());
+    }
+
+    #[test]
+    fn project_copy_hit_target_is_distinct_from_collapse_and_uses_full_bundle() {
+        let selected = project("agent-hud", r"C:\worktrees\one", Some("repo:one"));
+        let linked = project("agent-hud", r"C:\worktrees\two", Some("repo:one"));
+        let mut first = rich_session("first");
+        first.project_identity = Some(selected.clone());
+        first.latest_result = Some("first full result".into());
+        let mut second = rich_session("second");
+        second.project_identity = Some(linked);
+        second.latest_result = Some("second full result with details".into());
+
+        let mut state = ApplicationState::default();
+        state.apply(SessionChange::Snapshot(vec![first, second]));
+        let header = project_header_layout(620.0, 92.0);
+        let click = (header.copy_button.left + 2.0, header.copy_button.top + 2.0);
+
+        assert!(
+            project_result_payload(&selected, &state)
+                .is_some_and(|payload| payload.contains("second full result with details"))
+        );
+        assert!(matches!(
+            hit_test(&state, &ViewState::default(), click.0, click.1, 620.0),
+            Some(HitTarget::CopyProject(identity)) if identity == selected
+        ));
+        assert!(matches!(
+            hit_test(&state, &ViewState::default(), 28.0, 92.0, 620.0),
+            Some(HitTarget::Project(Some(identity))) if identity == selected
+        ));
+    }
+
+    #[test]
+    fn project_copy_does_not_mix_same_name_with_different_repository() {
+        let selected = project("agent-hud", r"C:\one", Some("repo:one"));
+        let other = project("agent-hud", r"C:\two", Some("repo:two"));
+        let mut included = rich_session("included");
+        included.project_identity = Some(selected.clone());
+        included.latest_result = Some("included result".into());
+        let mut excluded = rich_session("excluded");
+        excluded.project_identity = Some(other);
+        excluded.latest_result = Some("excluded result".into());
+
+        let mut state = ApplicationState::default();
+        state.apply(SessionChange::Snapshot(vec![included, excluded]));
+        let payload = project_result_payload(&selected, &state).unwrap();
+        assert!(payload.contains("included result"));
+        assert!(!payload.contains("excluded result"));
+    }
+
+    #[test]
+    fn project_copy_is_unavailable_when_all_results_are_empty() {
+        let selected = project("agent-hud", r"C:\agent-hud", Some("repo:one"));
+        let mut empty = session("empty", 1);
+        empty.project_identity = Some(selected.clone());
+        let mut state = ApplicationState::default();
+        state.apply(SessionChange::Snapshot(vec![empty]));
+
+        assert!(project_result_payload(&selected, &state).is_none());
+        assert!(hit_test(&state, &ViewState::default(), 520.0, 98.0, 620.0).is_some_and(
+            |target| matches!(target, HitTarget::Project(Some(identity)) if identity == selected)
+        ));
     }
 
     #[test]
