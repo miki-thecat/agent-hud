@@ -15,6 +15,7 @@ use windows_window::*;
 
 use crate::{
     model::{ApplicationState, SessionChange},
+    project::ProjectIdentity,
     readiness::Readiness,
     watcher::LiveWatcher,
 };
@@ -109,14 +110,20 @@ fn run_window(database_path: PathBuf) -> windows_canvas::Result<()> {
     let mut state = ApplicationState::default();
     let mut applied_dpi = requested_dpi.get();
     let mut retry_after_recreate = false;
+    let mut view = ViewState::default();
     let mut dirty = true;
     run_with(|| {
         while let Ok(change) = rx.try_recv() {
             dirty |= state.apply(change);
         }
         while let Ok(y) = click_rx.try_recv() {
-            if let Some(item) = session_at_client_y(&state, y, requested_dpi.get()) {
-                dirty |= state.acknowledge(&item);
+            match hit_test(&state, &view, client_y_px_to_dips(y, requested_dpi.get())) {
+                Some(HitTarget::Project(identity)) => {
+                    view.toggle_project(identity);
+                    dirty = true;
+                }
+                Some(HitTarget::Session(id)) => dirty |= state.acknowledge(&id),
+                None => {}
             }
         }
         let (width, height) = window.client_size();
@@ -136,7 +143,7 @@ fn run_window(database_path: PathBuf) -> windows_canvas::Result<()> {
         if !dirty {
             return Ok(false);
         }
-        match draw(&mut chain, &state) {
+        match draw(&mut chain, &state, &view) {
             Ok(true) => {
                 retry_after_recreate = false;
             }
@@ -213,7 +220,11 @@ fn create_chain(
     Ok(chain)
 }
 
-fn draw(chain: &mut SwapChain, state: &ApplicationState) -> windows_canvas::Result<bool> {
+fn draw(
+    chain: &mut SwapChain,
+    state: &ApplicationState,
+    view: &ViewState,
+) -> windows_canvas::Result<bool> {
     let width = chain.width() as f32;
     let height = chain.height() as f32;
     let session = chain.begin_draw()?;
@@ -261,49 +272,75 @@ fn draw(chain: &mut SwapChain, state: &ApplicationState) -> windows_canvas::Resu
             20.0,
         );
     }
-    for (index, item) in state.sessions().iter().enumerate() {
-        let top = 92.0 + index as f32 * 30.0;
-        let title = item
-            .title
-            .as_deref()
-            .filter(|title| !title.is_empty())
-            .unwrap_or("(untitled)");
-        let title: String = title
-            .chars()
-            .map(|c| if c.is_control() { ' ' } else { c })
-            .take(64)
-            .collect();
-        if let Some(project_rect) = row_layout.project {
-            let project = item
-                .project_identity
-                .as_ref()
-                .map(|project| project.normalized_name.as_str())
-                .unwrap_or_default();
-            session.draw_text(
+    let mut top = 92.0;
+    for group in project_groups(state) {
+        let collapsed = view.is_collapsed(group.identity);
+        let project = group
+            .identity
+            .map(|identity| identity.normalized_name.as_str())
+            .unwrap_or("(unknown project)");
+        session.draw_text(
+            &format!(
+                "{} {} ({})",
+                if collapsed { "▶" } else { "▼" },
                 project,
-                &project_format,
-                &Rect::new(project_rect.left, top, project_rect.right, top + 28.0),
-                &brush,
-            );
-        }
-        if let Some(title_rect) = row_layout.title {
-            session.draw_text(
-                &title,
-                &row_format,
-                &Rect::new(title_rect.left, top + 2.0, title_rect.right, top + 26.0),
-                &brush,
-            );
-        }
-        draw_status_badge(
-            &session,
-            &status_format,
-            &status_brush,
-            item.readiness,
-            item.needs_attention,
-            row_layout.badge,
-            top + 4.0,
+                group.sessions.len()
+            ),
+            &project_format,
+            &Rect::new(28.0, top, width - 24.0, top + 28.0),
+            &brush,
         );
-        if top + 30.0 > height {
+        top += 28.0;
+        if collapsed {
+            continue;
+        }
+        for item in group.sessions {
+            let title = item
+                .title
+                .as_deref()
+                .filter(|title| !title.is_empty())
+                .unwrap_or("(untitled)");
+            let title: String = title
+                .chars()
+                .map(|c| if c.is_control() { ' ' } else { c })
+                .take(64)
+                .collect();
+            if let Some(project_rect) = row_layout.project {
+                let project = item
+                    .project_identity
+                    .as_ref()
+                    .map(|project| project.normalized_name.as_str())
+                    .unwrap_or_default();
+                session.draw_text(
+                    project,
+                    &project_format,
+                    &Rect::new(project_rect.left, top, project_rect.right, top + 28.0),
+                    &brush,
+                );
+            }
+            if let Some(title_rect) = row_layout.title {
+                session.draw_text(
+                    &title,
+                    &row_format,
+                    &Rect::new(title_rect.left, top + 2.0, title_rect.right, top + 26.0),
+                    &brush,
+                );
+            }
+            draw_status_badge(
+                &session,
+                &status_format,
+                &status_brush,
+                item.readiness,
+                item.needs_attention,
+                row_layout.badge,
+                top + 4.0,
+            );
+            top += 30.0;
+            if top > height {
+                break;
+            }
+        }
+        if top > height {
             break;
         }
     }
@@ -396,31 +433,90 @@ fn draw_status_badge(
     );
 }
 
-fn session_at_client_y(state: &ApplicationState, client_y_px: f32, dpi: f32) -> Option<String> {
-    session_at_y(state, client_y_px_to_dips(client_y_px, dpi))
-}
-
 fn client_y_px_to_dips(client_y_px: f32, dpi: f32) -> f32 {
     client_y_px * 96.0 / dpi.max(1.0)
 }
 
-fn session_at_y(state: &ApplicationState, y: f32) -> Option<String> {
-    state
-        .sessions()
-        .iter()
-        .enumerate()
-        .find(|(index, _)| {
-            let top = 92.0 + *index as f32 * 30.0;
-            y >= top && y < top + 30.0
-        })
-        .map(|(_, item)| item.id.clone())
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+struct ViewState {
+    collapsed_projects: Vec<Option<ProjectIdentity>>,
+}
+
+impl ViewState {
+    fn is_collapsed(&self, identity: Option<&ProjectIdentity>) -> bool {
+        self.collapsed_projects
+            .iter()
+            .any(|collapsed| collapsed.as_ref() == identity)
+    }
+
+    fn toggle_project(&mut self, identity: Option<ProjectIdentity>) {
+        if let Some(index) = self
+            .collapsed_projects
+            .iter()
+            .position(|collapsed| collapsed.as_ref() == identity.as_ref())
+        {
+            self.collapsed_projects.remove(index);
+        } else {
+            self.collapsed_projects.push(identity);
+        }
+    }
+}
+
+struct ProjectGroup<'a> {
+    identity: Option<&'a ProjectIdentity>,
+    sessions: Vec<&'a crate::model::SessionViewModel>,
+}
+
+fn project_groups(state: &ApplicationState) -> Vec<ProjectGroup<'_>> {
+    let mut groups = Vec::new();
+    for session in state.sessions() {
+        let identity = session.project_identity.as_ref();
+        if let Some(group) = groups
+            .iter_mut()
+            .find(|group: &&mut ProjectGroup<'_>| group.identity == identity)
+        {
+            group.sessions.push(session);
+        } else {
+            groups.push(ProjectGroup {
+                identity,
+                sessions: vec![session],
+            });
+        }
+    }
+    groups
+}
+
+enum HitTarget {
+    Project(Option<ProjectIdentity>),
+    Session(String),
+}
+
+fn hit_test(state: &ApplicationState, view: &ViewState, y: f32) -> Option<HitTarget> {
+    let mut top = 92.0;
+    for group in project_groups(state) {
+        if y >= top && y < top + 28.0 {
+            return Some(HitTarget::Project(group.identity.cloned()));
+        }
+        top += 28.0;
+        if view.is_collapsed(group.identity) {
+            continue;
+        }
+        for session in group.sessions {
+            if y >= top && y < top + 30.0 {
+                return Some(HitTarget::Session(session.id.clone()));
+            }
+            top += 30.0;
+        }
+    }
+    None
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{TextRect, client_y_px_to_dips, row_layout, session_at_client_y};
+    use super::{HitTarget, TextRect, ViewState, client_y_px_to_dips, hit_test, row_layout};
     use crate::{
         model::{ApplicationState, SessionChange, SessionViewModel},
+        project::ProjectIdentity,
         readiness::Readiness,
     };
 
@@ -452,10 +548,10 @@ mod tests {
         let state = two_rows();
 
         assert_eq!(client_y_px_to_dips(122.0, 96.0), 122.0);
-        assert_eq!(
-            session_at_client_y(&state, 122.0, 96.0).as_deref(),
-            Some("second")
-        );
+        assert!(matches!(
+            hit_test(&state, &ViewState::default(), 122.0),
+            Some(HitTarget::Session(id)) if id == "first"
+        ));
     }
 
     #[test]
@@ -463,10 +559,61 @@ mod tests {
         let state = two_rows();
 
         assert_eq!(client_y_px_to_dips(183.0, 144.0), 122.0);
-        assert_eq!(
-            session_at_client_y(&state, 183.0, 144.0).as_deref(),
-            Some("second")
-        );
+        assert!(matches!(
+            hit_test(&state, &ViewState::default(), 122.0),
+            Some(HitTarget::Session(id)) if id == "first"
+        ));
+    }
+
+    #[test]
+    fn sessions_are_grouped_by_full_project_identity() {
+        let mut state = ApplicationState::default();
+        let project = ProjectIdentity {
+            normalized_name: "same-name".into(),
+            root_path: Some("C:\\one".into()),
+            repository_identity: None,
+        };
+        let other_project = ProjectIdentity {
+            root_path: Some("C:\\two".into()),
+            ..project.clone()
+        };
+        let mut first = session("first", 3);
+        first.project_identity = Some(project.clone());
+        let mut second = session("second", 2);
+        second.project_identity = Some(project);
+        let mut third = session("third", 1);
+        third.project_identity = Some(other_project);
+        state.apply(SessionChange::Snapshot(vec![third, first, second]));
+
+        let groups = super::project_groups(&state);
+        assert_eq!(groups.len(), 2);
+        assert_eq!(groups[0].sessions.len(), 2);
+        assert_eq!(groups[1].sessions.len(), 1);
+    }
+
+    #[test]
+    fn project_header_and_session_hit_testing_follow_expansion_state() {
+        let mut state = ApplicationState::default();
+        let project = ProjectIdentity {
+            normalized_name: "agent-hud".into(),
+            root_path: None,
+            repository_identity: None,
+        };
+        let mut item = session("first", 1);
+        item.project_identity = Some(project.clone());
+        state.apply(SessionChange::Snapshot(vec![item]));
+
+        assert!(matches!(
+            hit_test(&state, &ViewState::default(), 92.0),
+            Some(HitTarget::Project(Some(identity))) if identity == project
+        ));
+        let mut view = ViewState::default();
+        view.toggle_project(Some(project.clone()));
+        assert!(matches!(
+            hit_test(&state, &view, 100.0),
+            Some(HitTarget::Project(Some(identity))) if identity == project
+        ));
+        assert!(hit_test(&state, &view, 120.0).is_none());
     }
 
     #[test]
