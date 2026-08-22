@@ -1,4 +1,5 @@
 pub mod attention;
+pub mod capability;
 #[cfg(windows)]
 mod config;
 mod discovery;
