@@ -7,6 +7,7 @@ mod watcher;
 
 #[cfg(windows)]
 mod hud;
+pub mod navigation;
 
 use std::{env, path::PathBuf, process::ExitCode};
 
