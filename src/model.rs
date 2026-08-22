@@ -65,8 +65,26 @@ pub struct ApplicationState {
 }
 
 impl ApplicationState {
+    #[allow(dead_code)]
     pub fn sessions(&self) -> &[SessionViewModel] {
         &self.sessions
+    }
+
+    /// Returns the presentation subset for the selected project.
+    ///
+    /// The underlying session collection is never changed by filtering. A
+    /// missing filter keeps every session visible; a selected identity keeps
+    /// only sessions with the same complete project identity.
+    pub fn sessions_for_project(
+        &self,
+        project: Option<&ProjectIdentity>,
+    ) -> Vec<&SessionViewModel> {
+        self.sessions
+            .iter()
+            .filter(|session| {
+                project.is_none_or(|project| session.project_identity.as_ref() == Some(project))
+            })
+            .collect()
     }
 
     pub fn apply(&mut self, change: SessionChange) -> bool {
@@ -200,6 +218,79 @@ mod tests {
                 .collect::<Vec<_>>(),
             vec!["a", "c", "b"]
         );
+    }
+
+    #[test]
+    fn project_filter_returns_matching_sessions_in_existing_order() {
+        let selected = ProjectIdentity {
+            normalized_name: "selected".into(),
+            root_path: None,
+            repository_identity: Some("repo:selected".into()),
+        };
+        let other = ProjectIdentity {
+            normalized_name: "other".into(),
+            root_path: None,
+            repository_identity: Some("repo:other".into()),
+        };
+        let mut first = session("first", Readiness::Working, 10);
+        first.project_identity = Some(selected.clone());
+        let mut second = session("second", Readiness::Ready, 30);
+        second.project_identity = Some(other);
+        let mut third = session("third", Readiness::Unknown, 20);
+        third.project_identity = Some(selected.clone());
+
+        let mut state = ApplicationState::default();
+        state.apply(SessionChange::Snapshot(vec![first, second, third]));
+
+        assert_eq!(
+            state
+                .sessions_for_project(Some(&selected))
+                .iter()
+                .map(|session| session.id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["third", "first"]
+        );
+        assert_eq!(state.sessions().len(), 3);
+    }
+
+    #[test]
+    fn missing_project_filter_keeps_sessions_without_identity_visible() {
+        let mut identified = session("identified", Readiness::Ready, 2);
+        identified.project_identity = Some(ProjectIdentity {
+            normalized_name: "project".into(),
+            root_path: None,
+            repository_identity: None,
+        });
+        let unscoped = session("unscoped", Readiness::Unknown, 1);
+
+        let mut state = ApplicationState::default();
+        state.apply(SessionChange::Snapshot(vec![identified, unscoped]));
+
+        assert_eq!(state.sessions_for_project(None).len(), 2);
+    }
+
+    #[test]
+    fn filtering_does_not_change_readiness_or_attention() {
+        let selected = ProjectIdentity {
+            normalized_name: "selected".into(),
+            root_path: None,
+            repository_identity: None,
+        };
+        let mut item = session("selected", Readiness::Working, 1);
+        item.project_identity = Some(selected.clone());
+        let mut state = ApplicationState::default();
+        state.apply(SessionChange::Snapshot(vec![item]));
+        state.apply(SessionChange::Updated(SessionViewModel {
+            readiness: Readiness::Ready,
+            project_identity: Some(selected.clone()),
+            ..session("selected", Readiness::Ready, 1)
+        }));
+
+        let filtered = state.sessions_for_project(Some(&selected));
+        assert_eq!(filtered[0].readiness, Readiness::Ready);
+        assert!(filtered[0].needs_attention);
+        assert_eq!(state.sessions()[0].readiness, Readiness::Ready);
+        assert!(state.sessions()[0].needs_attention);
     }
 
     #[test]

@@ -469,7 +469,7 @@ struct ProjectGroup<'a> {
 
 fn project_groups(state: &ApplicationState) -> Vec<ProjectGroup<'_>> {
     let mut groups = Vec::new();
-    for session in state.sessions() {
+    for session in state.sessions_for_project(None) {
         let identity = session.project_identity.as_ref();
         if let Some(group) = groups
             .iter_mut()
