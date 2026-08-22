@@ -1,6 +1,6 @@
 use std::{
     fs::File,
-    io::{BufRead, BufReader, Read},
+    io::{BufRead, BufReader},
     path::{Path, PathBuf},
 };
 
@@ -85,14 +85,7 @@ fn read_candidates(
 }
 
 fn parse_rollout(candidate: Candidate) -> Result<SessionSnapshot, DiscoveryError> {
-    let mut file = File::open(&candidate.rollout_path).map_err(DiscoveryError::Rollout)?;
-    let mut contents = Vec::new();
-    file.read_to_end(&mut contents)
-        .map_err(DiscoveryError::Rollout)?;
-    if !contents.ends_with(b"\n") {
-        return Err(DiscoveryError::IncompleteRollout);
-    }
-    let file = std::io::Cursor::new(contents);
+    let file = File::open(&candidate.rollout_path).map_err(DiscoveryError::Rollout)?;
     let mut lines = BufReader::new(file).lines();
     let first = lines
         .next()
@@ -382,7 +375,6 @@ pub enum DiscoveryError {
     InvalidMetadata,
     IdentityMismatch,
     MalformedLifecycle,
-    IncompleteRollout,
 }
 
 impl std::fmt::Display for DiscoveryError {
@@ -394,7 +386,6 @@ impl std::fmt::Display for DiscoveryError {
             Self::InvalidMetadata => formatter.write_str("invalid rollout session metadata"),
             Self::IdentityMismatch => formatter.write_str("rollout identity mismatch"),
             Self::MalformedLifecycle => formatter.write_str("malformed lifecycle record"),
-            Self::IncompleteRollout => formatter.write_str("incomplete rollout record"),
         }
     }
 }
@@ -504,6 +495,30 @@ mod tests {
         assert_eq!(snapshots[0].workflow_events.len(), 2);
         assert_eq!(snapshots[0].workflow_events[0].sequence, 0);
         assert_eq!(snapshots[0].workflow_events[1].sequence, 1);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn accepts_a_complete_final_record_without_a_trailing_newline() {
+        let root = workspace("complete-without-final-newline");
+        let database = root.join("state.sqlite");
+        let connection = setup_database(&database);
+        let path = root.join("rollout.jsonl");
+        let contents = rollout(
+            "root",
+            &format!(
+                "{}\n{}",
+                event("task_started", "one"),
+                event("task_complete", "one")
+            ),
+        );
+        fs::write(&path, contents.trim_end_matches('\n')).unwrap();
+        insert(&connection, "root", &path, 10, "user");
+        drop(connection);
+
+        let snapshots = snapshot_from_paths(&database, RECENT_SESSION_LIMIT).unwrap();
+        assert_eq!(snapshots.len(), 1);
+        assert_eq!(snapshots[0].readiness, Readiness::Ready);
         fs::remove_dir_all(root).unwrap();
     }
 

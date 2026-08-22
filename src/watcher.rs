@@ -423,12 +423,7 @@ mod tests {
         fs::create_dir_all(&root).unwrap();
         let database = root.join("state_5.sqlite");
         let rollout_path = root.join("rollout.jsonl");
-        let persisted = if name == "incomplete" {
-            contents.trim_end_matches('\n')
-        } else {
-            contents
-        };
-        fs::write(&rollout_path, persisted).unwrap();
+        fs::write(&rollout_path, contents).unwrap();
         let connection = Connection::open(&database).unwrap();
         connection
             .execute_batch(
