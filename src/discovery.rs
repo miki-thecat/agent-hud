@@ -8,6 +8,7 @@ use rusqlite::{Connection, OpenFlags};
 use serde_json::Value;
 
 use crate::model::{WORKFLOW_EVENT_LIMIT, WorkflowEvent, WorkflowEventKind};
+use crate::project::ProjectIdentity;
 use crate::readiness::{LifecycleEvent, LifecycleKind, Readiness, reduce_lifecycle};
 use crate::verification::{VerificationEvidence, parse_command_execution};
 
@@ -19,7 +20,7 @@ pub struct SessionSnapshot {
     pub id: String,
     pub title: Option<String>,
     pub cwd: Option<String>,
-    pub project_label: Option<String>,
+    pub project_identity: Option<ProjectIdentity>,
     pub readiness: Readiness,
     pub latest_result: Option<String>,
     pub recency_at_ms: i64,
@@ -126,7 +127,7 @@ fn parse_rollout(candidate: Candidate) -> Result<SessionSnapshot, DiscoveryError
     Ok(SessionSnapshot {
         id: candidate.id,
         title: candidate.title.filter(|title| !title.trim().is_empty()),
-        project_label: project_label(candidate.cwd.as_deref()),
+        project_identity: ProjectIdentity::from_cwd(candidate.cwd.as_deref()),
         cwd: candidate.cwd,
         readiness: reduce_lifecycle(events.iter().map(|(kind, turn_id)| LifecycleEvent {
             kind: *kind,
@@ -266,18 +267,6 @@ pub(crate) fn assistant_result(record: &Value) -> Option<String> {
     (!result.trim().is_empty()).then_some(result)
 }
 
-pub fn project_label(cwd: Option<&str>) -> Option<String> {
-    let path = cwd?.trim().trim_end_matches(['\\', '/']);
-    if path.is_empty() || path.ends_with(':') {
-        return None;
-    }
-    let component = path.rsplit(['\\', '/']).next()?.trim();
-    if component.is_empty() || component == "." || component == ".." {
-        return None;
-    }
-    Some(component.to_owned())
-}
-
 pub(crate) fn validate_metadata(metadata: &Value, expected_id: &str) -> Result<(), DiscoveryError> {
     if metadata.get("type").and_then(Value::as_str) != Some("session_meta") {
         return Err(DiscoveryError::InvalidMetadata);
@@ -411,7 +400,7 @@ mod tests {
 
     use super::{
         CHANGED_FILE_LIMIT, RECENT_SESSION_LIMIT, append_changed_files, append_workflow_event,
-        assistant_result, file_change_paths, project_label, snapshot_from_paths, workflow_event,
+        assistant_result, file_change_paths, snapshot_from_paths, workflow_event,
     };
     use crate::{
         model::{WORKFLOW_EVENT_LIMIT, WorkflowEventKind},
@@ -473,25 +462,6 @@ mod tests {
     }
 
     #[test]
-    fn project_label_uses_final_windows_component_and_handles_trailing_separator() {
-        assert_eq!(
-            project_label(Some(r"C:\Users\kanat\dev\agent-hud")),
-            Some("agent-hud".into())
-        );
-        assert_eq!(
-            project_label(Some(r"C:\Users\kanat\dev\agent-hud\\")),
-            Some("agent-hud".into())
-        );
-    }
-
-    #[test]
-    fn missing_or_empty_project_context_is_optional() {
-        assert_eq!(project_label(None), None);
-        assert_eq!(project_label(Some("   ")), None);
-        assert_eq!(project_label(Some(r"C:\")), None);
-    }
-
-    #[test]
     fn discovers_and_reduces_latest_lifecycle_record() {
         let root = workspace("readiness");
         let database = root.join("state.sqlite");
@@ -515,10 +485,34 @@ mod tests {
         let snapshots = snapshot_from_paths(&database, RECENT_SESSION_LIMIT).unwrap();
         assert_eq!(snapshots[0].readiness, Readiness::Working);
         assert_eq!(snapshots[0].latest_result, None);
-        assert_eq!(snapshots[0].project_label.as_deref(), Some("agent-hud"));
+        assert_eq!(
+            snapshots[0]
+                .project_identity
+                .as_ref()
+                .map(|project| project.normalized_name.as_str()),
+            Some("agent-hud")
+        );
         assert_eq!(snapshots[0].workflow_events.len(), 2);
         assert_eq!(snapshots[0].workflow_events[0].sequence, 0);
         assert_eq!(snapshots[0].workflow_events[1].sequence, 1);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn multiple_sessions_share_the_same_project_identity() {
+        let root = workspace("shared-project");
+        let database = root.join("state.sqlite");
+        let connection = setup_database(&database);
+        for id in ["first", "second"] {
+            let path = root.join(format!("{id}.jsonl"));
+            fs::write(&path, rollout(id, &event("task_complete", "turn"))).unwrap();
+            insert(&connection, id, &path, 10, "user");
+        }
+        drop(connection);
+
+        let snapshots = snapshot_from_paths(&database, RECENT_SESSION_LIMIT).unwrap();
+        assert_eq!(snapshots.len(), 2);
+        assert_eq!(snapshots[0].project_identity, snapshots[1].project_identity);
         fs::remove_dir_all(root).unwrap();
     }
 

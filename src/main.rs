@@ -1,5 +1,6 @@
 mod discovery;
 mod model;
+mod project;
 mod readiness;
 mod verification;
 mod watcher;
