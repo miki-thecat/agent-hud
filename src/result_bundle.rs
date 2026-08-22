@@ -97,8 +97,22 @@ impl ProjectResultBundle {
 fn same_logical_project(left: &ProjectIdentity, right: &ProjectIdentity) -> bool {
     match (&left.repository_identity, &right.repository_identity) {
         (Some(left), Some(right)) => left == right,
-        _ => left.root_path == right.root_path,
+        _ => canonical_root_paths_equal(left.root_path.as_deref(), right.root_path.as_deref()),
     }
+}
+
+fn canonical_root_paths_equal(
+    left: Option<&std::path::Path>,
+    right: Option<&std::path::Path>,
+) -> bool {
+    let (Some(left), Some(right)) = (left, right) else {
+        return false;
+    };
+
+    std::fs::canonicalize(left)
+        .ok()
+        .zip(std::fs::canonicalize(right).ok())
+        .is_some_and(|(left, right)| left == right)
 }
 
 fn session_ordering(sessions: &[SessionViewModel], left_id: &str, right_id: &str) -> Ordering {
