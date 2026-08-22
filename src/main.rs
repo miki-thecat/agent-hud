@@ -5,6 +5,9 @@ mod readiness;
 mod verification;
 mod watcher;
 
+#[cfg(test)]
+mod benchmark;
+
 #[cfg(windows)]
 mod hud;
 pub mod navigation;
