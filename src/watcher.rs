@@ -11,6 +11,7 @@ use serde_json::Value;
 
 use crate::{
     discovery::{self, SessionSnapshot, append_workflow_event},
+    metrics::SessionMetrics,
     model::SessionChange,
     model::WorkflowEvent,
     readiness::{LifecycleKind, Readiness},
@@ -277,6 +278,8 @@ impl LiveWatcher {
                         session.snapshot.verification = session.rollout.verification.clone();
                         session.snapshot.workflow_events =
                             session.rollout.workflow_events().to_vec();
+                        session.snapshot.metrics =
+                            SessionMetrics::from_workflow_events(&session.snapshot.workflow_events);
                         output.push(SessionChange::Updated((&session.snapshot).into()));
                     }
                     RolloutUpdate::Reconcile => return self.reconcile(),

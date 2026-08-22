@@ -335,6 +335,7 @@ mod tests {
             rollout_path: PathBuf::from("rollout.jsonl"),
             verification: None,
             workflow_events: Vec::new(),
+            metrics: Default::default(),
         };
         let mut state = ApplicationState::default();
         state.apply(SessionChange::Snapshot(vec![(&snapshot).into()]));
