@@ -16,6 +16,7 @@ use windows_sys::Win32::{
 use windows_window::*;
 
 use crate::{
+    config::Config,
     model::{ApplicationState, SessionChange},
     project::ProjectIdentity,
     readiness::Readiness,
@@ -36,20 +37,20 @@ struct Click {
     y: f32,
 }
 
-pub fn run(database_path: PathBuf) -> std::process::ExitCode {
-    if let Err(error) = run_window(database_path) {
+pub fn run(database_path: PathBuf, config: Config) -> std::process::ExitCode {
+    if let Err(error) = run_window(database_path, config) {
         eprintln!("agent-hud: unable to start native HUD: {error}");
         return std::process::ExitCode::FAILURE;
     }
     std::process::ExitCode::SUCCESS
 }
 
-fn run_window(database_path: PathBuf) -> windows_canvas::Result<()> {
+fn run_window(database_path: PathBuf, config: Config) -> windows_canvas::Result<()> {
     let requested_dpi = Rc::new(Cell::new(96.0_f32));
     let dpi_for_message = Rc::clone(&requested_dpi);
     let (click_tx, click_rx) = mpsc::channel::<Click>();
     let window = Window::new("agent-hud — Recent local sessions")
-        .size(620, 720)
+        .size(config.window_width as i32, config.window_height as i32)
         .on_message(move |hwnd, message, wparam, lparam| {
             if message == WM_DPICHANGED {
                 dpi_for_message.set((wparam & 0xffff) as f32);
