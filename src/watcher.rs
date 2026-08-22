@@ -10,8 +10,9 @@ use notify::{Event, EventKind, RecommendedWatcher, RecursiveMode, Watcher};
 use serde_json::Value;
 
 use crate::{
-    discovery::{self, SessionSnapshot},
+    discovery::{self, SessionSnapshot, append_workflow_event},
     model::SessionChange,
+    model::WorkflowEvent,
     readiness::{LifecycleKind, Readiness},
     verification::{VerificationEvidence, parse_command_execution},
 };
@@ -37,6 +38,8 @@ pub struct IncrementalRollout {
     latest_result: Option<String>,
     changed_files: Vec<String>,
     verification: Option<VerificationEvidence>,
+    workflow_events: Vec<WorkflowEvent>,
+    next_sequence: u64,
 }
 
 impl IncrementalRollout {
@@ -52,6 +55,8 @@ impl IncrementalRollout {
             latest_result: None,
             changed_files: Vec::new(),
             verification: None,
+            workflow_events: Vec::new(),
+            next_sequence: 0,
         };
         reader.read_from_start()?;
         Ok(reader)
@@ -63,6 +68,10 @@ impl IncrementalRollout {
 
     pub fn changed_files(&self) -> &[String] {
         &self.changed_files
+    }
+
+    pub fn workflow_events(&self) -> &[WorkflowEvent] {
+        &self.workflow_events
     }
 
     fn fail_closed(&mut self) {
@@ -102,6 +111,8 @@ impl IncrementalRollout {
         self.latest_result = None;
         self.changed_files.clear();
         self.verification = None;
+        self.workflow_events.clear();
+        self.next_sequence = 0;
         self.read_new_bytes()
     }
 
@@ -142,6 +153,10 @@ impl IncrementalRollout {
         }
         if let Some(result) = discovery::assistant_result(record) {
             self.latest_result = Some(result);
+        }
+        if let Some(event) = discovery::workflow_event(record, self.next_sequence) {
+            self.next_sequence += 1;
+            append_workflow_event(&mut self.workflow_events, event);
         }
         let Some((kind, turn_id, timestamp)) = discovery::lifecycle_record(record)
             .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?
@@ -260,6 +275,8 @@ impl LiveWatcher {
                         session.snapshot.latest_result = session.rollout.latest_result.clone();
                         session.snapshot.changed_files = session.rollout.changed_files().to_vec();
                         session.snapshot.verification = session.rollout.verification.clone();
+                        session.snapshot.workflow_events =
+                            session.rollout.workflow_events().to_vec();
                         output.push(SessionChange::Updated((&session.snapshot).into()));
                     }
                     RolloutUpdate::Reconcile => return self.reconcile(),
@@ -315,12 +332,14 @@ impl LiveWatcher {
                 let previous_result = existing.rollout.latest_result.clone();
                 let previous_files = existing.rollout.changed_files().to_vec();
                 let previous_verification = existing.rollout.verification.clone();
+                let previous_workflow_events = existing.rollout.workflow_events().to_vec();
                 let rollout = IncrementalRollout::open(snapshot.rollout_path.clone(), id.clone())
                     .map_err(io::Error::other)?;
                 if previous != rollout.readiness()
                     || previous_result != rollout.latest_result
                     || previous_files != rollout.changed_files()
                     || previous_verification != rollout.verification
+                    || previous_workflow_events != rollout.workflow_events()
                 {
                     output.push(SessionChange::Updated((&snapshot).into()));
                 }
@@ -481,6 +500,13 @@ mod tests {
 
         assert_eq!(reader.apply_append().unwrap(), RolloutUpdate::Changed);
         assert_eq!(reader.readiness, Readiness::Ready);
+        assert_eq!(reader.workflow_events.len(), 5);
+        assert!(
+            reader
+                .workflow_events
+                .windows(2)
+                .all(|pair| pair[0].sequence < pair[1].sequence)
+        );
         assert_eq!(reader.latest_result.as_deref(), Some("done"));
         assert_eq!(reader.changed_files, vec!["src/main.rs"]);
         assert_eq!(
@@ -518,6 +544,7 @@ mod tests {
         assert!(
             matches!(watcher.initial_changes().as_slice(), [SessionChange::Snapshot(items)] if items[0].readiness == Readiness::Working)
         );
+        assert_eq!(watcher.tracked["root"].rollout.workflow_events().len(), 1);
         let rollout_path = root.join("rollout.jsonl");
         let mut file = fs::OpenOptions::new()
             .append(true)
@@ -527,6 +554,12 @@ mod tests {
 
         assert!(
             matches!(watcher.reconcile().unwrap().as_slice(), [SessionChange::Snapshot(items)] if items[0].readiness == Readiness::Ready)
+        );
+        assert_eq!(watcher.tracked["root"].rollout.workflow_events().len(), 2);
+        let restarted = IncrementalRollout::open(rollout_path.clone(), "root".into()).unwrap();
+        assert_eq!(
+            watcher.tracked["root"].rollout.workflow_events(),
+            restarted.workflow_events()
         );
         assert!(watcher.reconcile().unwrap().is_empty());
         fs::remove_dir_all(root).unwrap();

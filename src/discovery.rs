@@ -7,6 +7,7 @@ use std::{
 use rusqlite::{Connection, OpenFlags};
 use serde_json::Value;
 
+use crate::model::{WORKFLOW_EVENT_LIMIT, WorkflowEvent, WorkflowEventKind};
 use crate::readiness::{LifecycleEvent, LifecycleKind, Readiness, reduce_lifecycle};
 use crate::verification::{VerificationEvidence, parse_command_execution};
 
@@ -26,6 +27,7 @@ pub struct SessionSnapshot {
     pub changed_files: Vec<String>,
     pub rollout_path: PathBuf,
     pub verification: Option<VerificationEvidence>,
+    pub workflow_events: Vec<WorkflowEvent>,
 }
 
 struct Candidate {
@@ -96,6 +98,8 @@ fn parse_rollout(candidate: Candidate) -> Result<SessionSnapshot, DiscoveryError
     let mut verification = None;
     let mut changed_files = Vec::new();
     let mut latest_result = None;
+    let mut workflow_events = Vec::new();
+    let mut sequence = 0;
     for line in lines {
         let line = line.map_err(DiscoveryError::Rollout)?;
         if line.trim().is_empty() {
@@ -112,6 +116,10 @@ fn parse_rollout(candidate: Candidate) -> Result<SessionSnapshot, DiscoveryError
         append_changed_files(&mut changed_files, file_change_paths(&record));
         if let Some(result) = assistant_result(&record) {
             latest_result = Some(result);
+        }
+        if let Some(event) = workflow_event(&record, sequence) {
+            sequence += 1;
+            append_workflow_event(&mut workflow_events, event);
         }
     }
 
@@ -130,7 +138,88 @@ fn parse_rollout(candidate: Candidate) -> Result<SessionSnapshot, DiscoveryError
         changed_files,
         rollout_path: candidate.rollout_path,
         verification,
+        workflow_events,
     })
+}
+
+pub(crate) fn workflow_event(record: &Value, sequence: u64) -> Option<WorkflowEvent> {
+    let timestamp = record
+        .get("timestamp")
+        .and_then(Value::as_str)
+        .map(str::to_owned);
+    let payload = record.get("payload")?;
+    let kind = match (
+        record.get("type").and_then(Value::as_str),
+        payload.get("type").and_then(Value::as_str),
+    ) {
+        (Some("event_msg"), Some("task_started")) => WorkflowEventKind::TaskStarted,
+        (Some("event_msg"), Some("task_complete")) => WorkflowEventKind::TaskCompleted,
+        (Some("response_item"), Some("message"))
+            if payload.get("role").and_then(Value::as_str) == Some("assistant")
+                && payload.get("phase").and_then(Value::as_str) == Some("final_answer") =>
+        {
+            WorkflowEventKind::AssistantResult
+        }
+        (Some("event_msg"), Some("item_completed")) => match payload
+            .get("item")
+            .and_then(|item| item.get("type"))
+            .and_then(Value::as_str)
+        {
+            Some("AgentMessage") => WorkflowEventKind::AssistantResult,
+            Some(kind)
+                if kind.eq_ignore_ascii_case("FileChange")
+                    || kind.eq_ignore_ascii_case("file_change") =>
+            {
+                WorkflowEventKind::FileChange
+            }
+            Some("CommandExecution") => WorkflowEventKind::CommandExecution,
+            _ => return None,
+        },
+        _ => return None,
+    };
+
+    match kind {
+        WorkflowEventKind::AssistantResult if assistant_result(record).is_none() => return None,
+        WorkflowEventKind::FileChange if file_change_paths(record).is_empty() => return None,
+        WorkflowEventKind::CommandExecution if parse_command_execution(record).is_none() => {
+            return None;
+        }
+        _ => {}
+    }
+
+    let summary = match kind {
+        WorkflowEventKind::TaskStarted | WorkflowEventKind::TaskCompleted => payload
+            .get("turn_id")
+            .and_then(Value::as_str)
+            .filter(|value| !value.is_empty())
+            .map(str::to_owned),
+        WorkflowEventKind::FileChange => payload
+            .get("item")
+            .and_then(|item| item.get("changes"))
+            .and_then(Value::as_array)
+            .map(|changes| format!("{} change(s)", changes.len())),
+        WorkflowEventKind::CommandExecution => payload
+            .get("item")
+            .and_then(|item| item.get("command"))
+            .and_then(Value::as_array)
+            .map(|command| format!("{} command part(s)", command.len())),
+        WorkflowEventKind::AssistantResult => None,
+    };
+
+    Some(WorkflowEvent {
+        sequence,
+        timestamp,
+        kind,
+        summary,
+    })
+}
+
+pub(crate) fn append_workflow_event(events: &mut Vec<WorkflowEvent>, event: WorkflowEvent) {
+    events.push(event);
+    if events.len() > WORKFLOW_EVENT_LIMIT {
+        let excess = events.len() - WORKFLOW_EVENT_LIMIT;
+        events.drain(..excess);
+    }
 }
 
 /// Extracts informational assistant output without contributing to readiness.
@@ -321,10 +410,13 @@ mod tests {
     use rusqlite::Connection;
 
     use super::{
-        CHANGED_FILE_LIMIT, RECENT_SESSION_LIMIT, append_changed_files, assistant_result,
-        file_change_paths, project_label, snapshot_from_paths,
+        CHANGED_FILE_LIMIT, RECENT_SESSION_LIMIT, append_changed_files, append_workflow_event,
+        assistant_result, file_change_paths, project_label, snapshot_from_paths, workflow_event,
     };
-    use crate::readiness::Readiness;
+    use crate::{
+        model::{WORKFLOW_EVENT_LIMIT, WorkflowEventKind},
+        readiness::Readiness,
+    };
     use serde_json::json;
 
     fn workspace(name: &str) -> std::path::PathBuf {
@@ -424,6 +516,9 @@ mod tests {
         assert_eq!(snapshots[0].readiness, Readiness::Working);
         assert_eq!(snapshots[0].latest_result, None);
         assert_eq!(snapshots[0].project_label.as_deref(), Some("agent-hud"));
+        assert_eq!(snapshots[0].workflow_events.len(), 2);
+        assert_eq!(snapshots[0].workflow_events[0].sequence, 0);
+        assert_eq!(snapshots[0].workflow_events[1].sequence, 1);
         fs::remove_dir_all(root).unwrap();
     }
 
@@ -585,6 +680,56 @@ mod tests {
                 "file-5.rs",
                 "file-3.rs"
             ]
+        );
+    }
+
+    #[test]
+    fn workflow_events_are_normalized_in_source_order_and_bounded() {
+        let mut events = Vec::new();
+        for sequence in 0..=WORKFLOW_EVENT_LIMIT as u64 {
+            append_workflow_event(
+                &mut events,
+                workflow_event(
+                    &json!({
+                        "timestamp": format!("2026-01-01T00:00:{sequence:02}Z"),
+                        "type": "event_msg",
+                        "payload": {"type": "task_started", "turn_id": format!("turn-{sequence}")}
+                    }),
+                    sequence,
+                )
+                .unwrap(),
+            );
+        }
+
+        assert_eq!(events.len(), WORKFLOW_EVENT_LIMIT);
+        assert_eq!(events.first().unwrap().sequence, 1);
+        assert_eq!(events.last().unwrap().sequence, WORKFLOW_EVENT_LIMIT as u64);
+        assert!(
+            events
+                .windows(2)
+                .all(|pair| pair[0].sequence < pair[1].sequence)
+        );
+        assert!(matches!(events[0].kind, WorkflowEventKind::TaskStarted));
+    }
+
+    #[test]
+    fn unsupported_or_incomplete_workflow_records_are_ignored() {
+        assert_eq!(
+            workflow_event(
+                &json!({"type": "response_item", "payload": {"type": "custom_tool_call"}}),
+                0,
+            ),
+            None
+        );
+        assert_eq!(
+            workflow_event(
+                &json!({
+                    "type": "event_msg",
+                    "payload": {"type": "item_completed", "item": {"type": "FileChange"}}
+                }),
+                0,
+            ),
+            None
         );
     }
 
