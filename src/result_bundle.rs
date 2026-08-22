@@ -23,11 +23,16 @@ pub struct ProjectResult {
 }
 
 impl ProjectResultBundle {
-    /// Collects non-empty results from sessions with exactly this project identity.
+    /// Collects non-empty results from sessions belonging to this logical project.
     pub fn from_sessions(project: &ProjectIdentity, sessions: &[SessionViewModel]) -> Self {
         let mut results = sessions
             .iter()
-            .filter(|session| session.project_identity.as_ref() == Some(project))
+            .filter(|session| {
+                session
+                    .project_identity
+                    .as_ref()
+                    .is_some_and(|candidate| same_logical_project(project, candidate))
+            })
             .filter_map(|session| {
                 let latest_result = session.latest_result.as_deref()?;
                 (!latest_result.trim().is_empty()).then(|| ProjectResult {
@@ -86,6 +91,13 @@ impl ProjectResultBundle {
                 output
             }
         }
+    }
+}
+
+fn same_logical_project(left: &ProjectIdentity, right: &ProjectIdentity) -> bool {
+    match (&left.repository_identity, &right.repository_identity) {
+        (Some(left), Some(right)) => left == right,
+        _ => left.root_path == right.root_path,
     }
 }
 
@@ -180,6 +192,27 @@ mod tests {
         let bundle = ProjectResultBundle::from_sessions(&selected, &sessions);
         assert!(bundle.format().contains("included"));
         assert!(!bundle.format().contains("excluded"));
+    }
+
+    #[test]
+    fn bundles_linked_worktrees_with_the_same_repository_identity() {
+        let selected = project("agent-hud", r"C:\worktrees\one", "repo:one");
+        let linked_worktree = project("agent-hud", r"C:\worktrees\two", "repo:one");
+        let sessions = vec![
+            session("selected", &selected, 2, Some("included"), None),
+            session(
+                "linked",
+                &linked_worktree,
+                3,
+                Some("linked result with full detail"),
+                None,
+            ),
+        ];
+
+        let bundle = ProjectResultBundle::from_sessions(&selected, &sessions);
+        let formatted = bundle.format();
+        assert!(formatted.contains("included"));
+        assert!(formatted.contains("linked result with full detail"));
     }
 
     #[test]
