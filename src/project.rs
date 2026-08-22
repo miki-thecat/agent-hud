@@ -57,7 +57,16 @@ fn repository_identity(cwd: &Path) -> Option<ProjectIdentity> {
     };
     let root = normalize_existing_path(root)?;
     let git_common_dir = normalize_existing_path(git_common_dir)?;
-    from_path(&root, Some(git_common_dir.to_string_lossy().into_owned()))
+    let mut identity = from_path(&root, Some(git_common_dir.to_string_lossy().into_owned()))?;
+    if let Some(repository_name) = git_common_dir
+        .parent()
+        .and_then(|path| path.file_name())
+        .and_then(|name| name.to_str())
+        .filter(|name| !name.trim().is_empty())
+    {
+        identity.normalized_name = repository_name.trim().to_owned();
+    }
+    Some(identity)
 }
 
 fn from_path(path: &Path, repository_identity: Option<String>) -> Option<ProjectIdentity> {
