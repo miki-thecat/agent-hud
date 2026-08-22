@@ -3,6 +3,7 @@ mod discovery;
 mod model;
 mod project;
 mod readiness;
+pub mod result_bundle;
 mod verification;
 mod watcher;
 
