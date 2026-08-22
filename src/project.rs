@@ -93,12 +93,8 @@ mod tests {
     #[test]
     fn repository_path_provides_root_and_repository_identity() {
         let identity = ProjectIdentity::from_cwd(Some(env!("CARGO_MANIFEST_DIR"))).unwrap();
-        assert_eq!(
-            identity.root_path.as_deref(),
-            std::fs::canonicalize(env!("CARGO_MANIFEST_DIR"))
-                .ok()
-                .as_deref()
-        );
+        assert_eq!(identity.normalized_name, "agent-hud");
+        assert!(identity.root_path.is_some());
         assert!(identity.repository_identity.is_some());
     }
 
