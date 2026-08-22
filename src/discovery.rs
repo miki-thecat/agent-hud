@@ -499,6 +499,30 @@ mod tests {
     }
 
     #[test]
+    fn accepts_a_complete_final_record_without_a_trailing_newline() {
+        let root = workspace("complete-without-final-newline");
+        let database = root.join("state.sqlite");
+        let connection = setup_database(&database);
+        let path = root.join("rollout.jsonl");
+        let contents = rollout(
+            "root",
+            &format!(
+                "{}\n{}",
+                event("task_started", "one"),
+                event("task_complete", "one")
+            ),
+        );
+        fs::write(&path, contents.trim_end_matches('\n')).unwrap();
+        insert(&connection, "root", &path, 10, "user");
+        drop(connection);
+
+        let snapshots = snapshot_from_paths(&database, RECENT_SESSION_LIMIT).unwrap();
+        assert_eq!(snapshots.len(), 1);
+        assert_eq!(snapshots[0].readiness, Readiness::Ready);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
     fn multiple_sessions_share_the_same_project_identity() {
         let root = workspace("shared-project");
         let database = root.join("state.sqlite");
