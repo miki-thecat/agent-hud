@@ -48,6 +48,23 @@ Codex App / app-server
 
 A platform shell may remain a thin separate module around native lifecycle, paint invalidation, DPI, and optional notification integration.
 
+For a user-facing summary of this flow, build/run commands, and current
+limitations, see the [user guide](user-guide.md). The implementation is
+intentionally split into four concerns:
+
+- **Codex adapter/discovery** reads the bounded local database and validates
+  the identity chain into root/user rollout files.
+- **Watcher** observes persisted changes and reduces validated lifecycle facts
+  into normalized session changes.
+- **Session state** keeps a small in-memory list, ordering, attention markers,
+  and degraded-observation state.
+- **Presentation/platform shell** renders the state in the native Windows HUD
+  or the text watcher; it does not parse raw protocol records.
+
+The current discovery result is a bounded **Recent local sessions** catalog,
+not proof of currently open Desktop chats. That distinction is part of the
+product contract and must remain visible in new UI or documentation.
+
 ## Current technology decision
 
 Windows-first candidate stack:
