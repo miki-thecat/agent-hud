@@ -1,6 +1,25 @@
 use crate::verification::VerificationEvidence;
 use crate::{discovery::SessionSnapshot, readiness::Readiness};
 
+pub const WORKFLOW_EVENT_LIMIT: usize = 32;
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum WorkflowEventKind {
+    TaskStarted,
+    TaskCompleted,
+    AssistantResult,
+    FileChange,
+    CommandExecution,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct WorkflowEvent {
+    pub sequence: u64,
+    pub timestamp: Option<String>,
+    pub kind: WorkflowEventKind,
+    pub summary: Option<String>,
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct SessionViewModel {
     pub id: String,
@@ -197,6 +216,7 @@ mod tests {
             changed_files: Vec::new(),
             rollout_path: PathBuf::from("rollout.jsonl"),
             verification: None,
+            workflow_events: Vec::new(),
         };
         let mut state = ApplicationState::default();
         state.apply(SessionChange::Snapshot(vec![(&snapshot).into()]));
