@@ -1,0 +1,88 @@
+name: Prepare Windows release
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Release version; must match the package version in Cargo.toml"
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ inputs.version }}
+  cancel-in-progress: false
+
+jobs:
+  package-windows:
+    name: Package Windows x64 artifact
+    runs-on: windows-latest
+    env:
+      RELEASE_VERSION: ${{ inputs.version }}
+      RELEASE_COMMIT: ${{ github.sha }}
+
+    steps:
+      - name: Check out the selected revision
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.sha }}
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Validate release inputs
+        shell: pwsh
+        run: |
+          if ($env:RELEASE_VERSION -notmatch '^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?(?:\+[0-9A-Za-z.-]+)?$') {
+            throw "version must be a SemVer-like value such as 0.1.0 or 0.1.0-rc.1"
+          }
+
+          $metadata = cargo metadata --locked --no-deps --format-version 1 | ConvertFrom-Json
+          $package = $metadata.packages | Where-Object { $_.name -eq 'agent-hud' }
+          if ($null -eq $package) {
+            throw 'agent-hud package was not found in Cargo metadata'
+          }
+          if ($package.version -ne $env:RELEASE_VERSION) {
+            throw "workflow version '$env:RELEASE_VERSION' does not match Cargo.toml version '$($package.version)'"
+          }
+
+      - name: Build locked release binary
+        run: cargo build --locked --release
+
+      - name: Assemble package and checksums
+        shell: pwsh
+        run: |
+          $packageName = "agent-hud-v$env:RELEASE_VERSION-windows-x86_64"
+          $packageRoot = Join-Path $env:RUNNER_TEMP $packageName
+          $archive = Join-Path $env:RUNNER_TEMP "$packageName.zip"
+          New-Item -ItemType Directory -Force -Path $packageRoot | Out-Null
+
+          Copy-Item target\release\agent-hud.exe (Join-Path $packageRoot 'agent-hud.exe')
+          @{
+            package = 'agent-hud'
+            version = $env:RELEASE_VERSION
+            commit = $env:RELEASE_COMMIT
+            target = 'x86_64-pc-windows-msvc'
+          } | ConvertTo-Json -Compress | Set-Content -Encoding utf8 (Join-Path $packageRoot 'release-manifest.json')
+
+          $files = @('agent-hud.exe', 'release-manifest.json')
+          $checksums = foreach ($file in $files) {
+            $hash = Get-FileHash (Join-Path $packageRoot $file) -Algorithm SHA256
+            "$($hash.Hash.ToLowerInvariant())  $file"
+          }
+          $checksums | Set-Content -Encoding ascii (Join-Path $packageRoot 'SHA256SUMS.txt')
+
+          Compress-Archive -Path (Join-Path $packageRoot '*') -DestinationPath $archive -CompressionLevel Optimal
+          "package=$packageName" >> $env:GITHUB_OUTPUT
+          "archive=$archive" >> $env:GITHUB_OUTPUT
+        id: package
+
+      - name: Upload Windows package
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ steps.package.outputs.package }}
+          path: ${{ steps.package.outputs.archive }}
+          if-no-files-found: error
+          retention-days: 14
