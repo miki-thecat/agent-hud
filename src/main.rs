@@ -1,6 +1,7 @@
 pub mod attention;
 mod discovery;
 pub mod extensions;
+pub mod linking;
 mod metrics;
 mod model;
 mod project;
