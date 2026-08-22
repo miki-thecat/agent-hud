@@ -65,6 +65,7 @@ pub struct ApplicationState {
 }
 
 impl ApplicationState {
+    #[allow(dead_code)]
     pub fn sessions(&self) -> &[SessionViewModel] {
         &self.sessions
     }
