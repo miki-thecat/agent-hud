@@ -1,4 +1,5 @@
 pub mod attention;
+#[cfg(windows)]
 mod config;
 mod discovery;
 pub mod extensions;
@@ -61,20 +62,23 @@ fn main() -> ExitCode {
             return ExitCode::FAILURE;
         }
     };
-    let config = match config::Config::load_optional(&codex_home.join(config::CONFIG_FILE_NAME)) {
-        Ok(config) => config,
-        Err(error) => {
-            eprintln!("agent-hud: ignoring local config: {error}");
-            config::Config::default()
-        }
-    };
     let database_path = codex_home.join("state_5.sqlite");
 
     if env::args().any(|argument| argument == "--watch") {
         return watch(database_path);
     }
     #[cfg(windows)]
-    return hud::run(database_path, config);
+    {
+        let config = match config::Config::load_optional(&codex_home.join(config::CONFIG_FILE_NAME))
+        {
+            Ok(config) => config,
+            Err(error) => {
+                eprintln!("agent-hud: ignoring local config: {error}");
+                config::Config::default()
+            }
+        };
+        hud::run(database_path, config)
+    }
 
     #[cfg(not(windows))]
     snapshot_cli(database_path)
