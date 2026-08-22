@@ -98,6 +98,13 @@ See:
 - `docs/references.md`
 - `templates/task-contract.md`
 
+## Documentation
+
+- [`docs/user-guide.md`](docs/user-guide.md) — prerequisites, build/run commands, and how to read the HUD.
+- [`docs/architecture.md`](docs/architecture.md) — current data flow and component boundaries.
+- [`docs/design/readiness-state-model.md`](docs/design/readiness-state-model.md) — readiness invariants and conservative state transitions.
+- [`docs/contributing.md`](docs/contributing.md) — isolated worktrees, verification, and contribution workflow.
+
 Validation evidence:
 
 - `docs/research/issue-16-readiness-validation.md`
