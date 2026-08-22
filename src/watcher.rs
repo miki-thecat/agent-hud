@@ -18,10 +18,7 @@ use crate::{
 
 #[derive(Debug, Eq, PartialEq)]
 pub enum RolloutUpdate {
-    Readiness(Readiness),
-    Result(String),
-    Verification(VerificationEvidence),
-    ChangedFiles,
+    Changed,
     NoChange,
     Reconcile,
 }
@@ -84,20 +81,14 @@ impl IncrementalRollout {
             return Ok(RolloutUpdate::Reconcile);
         }
         self.read_new_bytes()?;
-        if self.readiness != previous {
-            Ok(RolloutUpdate::Readiness(self.readiness))
-        } else if self.latest_result != previous_result {
-            Ok(self
-                .latest_result
-                .clone()
-                .map_or(RolloutUpdate::NoChange, RolloutUpdate::Result))
-        } else if self.changed_files != previous_files {
-            Ok(RolloutUpdate::ChangedFiles)
-        } else if self.verification != previous_verification {
-            Ok(self
-                .verification
-                .clone()
-                .map_or(RolloutUpdate::NoChange, RolloutUpdate::Verification))
+        if self.readiness != previous
+            || self.latest_result != previous_result
+            || self.changed_files != previous_files
+            || self.verification != previous_verification
+        {
+            // One filesystem notification can cover several rollout records.
+            // Publish the complete normalized state as one update.
+            Ok(RolloutUpdate::Changed)
         } else {
             Ok(RolloutUpdate::NoChange)
         }
@@ -264,22 +255,11 @@ impl LiveWatcher {
                 .find(|session| session.snapshot.rollout_path == *path)
             {
                 match session.rollout.apply_append()? {
-                    RolloutUpdate::Readiness(readiness) => {
-                        session.snapshot.readiness = readiness;
+                    RolloutUpdate::Changed => {
+                        session.snapshot.readiness = session.rollout.readiness;
                         session.snapshot.latest_result = session.rollout.latest_result.clone();
-                        output.push(SessionChange::Updated((&session.snapshot).into()));
-                    }
-                    RolloutUpdate::Result(result) => {
-                        session.snapshot.latest_result = Some(result);
                         session.snapshot.changed_files = session.rollout.changed_files().to_vec();
-                        output.push(SessionChange::Updated((&session.snapshot).into()));
-                    }
-                    RolloutUpdate::Verification(verification) => {
-                        session.snapshot.verification = Some(verification);
-                        output.push(SessionChange::Updated((&session.snapshot).into()));
-                    }
-                    RolloutUpdate::ChangedFiles => {
-                        session.snapshot.changed_files = session.rollout.changed_files().to_vec();
+                        session.snapshot.verification = session.rollout.verification.clone();
                         output.push(SessionChange::Updated((&session.snapshot).into()));
                     }
                     RolloutUpdate::Reconcile => return self.reconcile(),
@@ -432,10 +412,7 @@ mod tests {
         let (path, mut reader) = reader("lifecycle");
         let mut file = fs::OpenOptions::new().append(true).open(&path).unwrap();
         write!(file, "{}", event("task_started", "one")).unwrap();
-        assert_eq!(
-            reader.apply_append().unwrap(),
-            RolloutUpdate::Readiness(Readiness::Working)
-        );
+        assert_eq!(reader.apply_append().unwrap(), RolloutUpdate::Changed);
         writeln!(
             file,
             "{{\"type\":\"response_item\",\"payload\":{{\"type\":\"command_execution\"}}}}"
@@ -443,10 +420,7 @@ mod tests {
         .unwrap();
         assert_eq!(reader.apply_append().unwrap(), RolloutUpdate::NoChange);
         write!(file, "{}", event("task_complete", "one")).unwrap();
-        assert_eq!(
-            reader.apply_append().unwrap(),
-            RolloutUpdate::Readiness(Readiness::Ready)
-        );
+        assert_eq!(reader.apply_append().unwrap(), RolloutUpdate::Changed);
         let _ = fs::remove_file(path);
     }
     #[test]
@@ -458,10 +432,7 @@ mod tests {
         write!(file, "{first}").unwrap();
         assert_eq!(reader.apply_append().unwrap(), RolloutUpdate::NoChange);
         write!(file, "{second}").unwrap();
-        assert_eq!(
-            reader.apply_append().unwrap(),
-            RolloutUpdate::Readiness(Readiness::Working)
-        );
+        assert_eq!(reader.apply_append().unwrap(), RolloutUpdate::Changed);
         let _ = fs::remove_file(path);
     }
     #[test]
@@ -469,10 +440,7 @@ mod tests {
         let (path, mut reader) = reader("duplicate");
         let mut file = fs::OpenOptions::new().append(true).open(&path).unwrap();
         write!(file, "{}", event("task_started", "one")).unwrap();
-        assert_eq!(
-            reader.apply_append().unwrap(),
-            RolloutUpdate::Readiness(Readiness::Working)
-        );
+        assert_eq!(reader.apply_append().unwrap(), RolloutUpdate::Changed);
         assert_eq!(reader.apply_append().unwrap(), RolloutUpdate::NoChange);
         let _ = fs::remove_file(path);
     }
@@ -488,19 +456,39 @@ mod tests {
             event("task_complete", "one")
         )
         .unwrap();
-        assert_eq!(
-            reader.apply_append().unwrap(),
-            RolloutUpdate::Readiness(Readiness::Ready)
-        );
+        assert_eq!(reader.apply_append().unwrap(), RolloutUpdate::Changed);
         write!(file, "{}", event("task_started", "two")).unwrap();
-        assert_eq!(
-            reader.apply_append().unwrap(),
-            RolloutUpdate::Readiness(Readiness::Working)
-        );
+        assert_eq!(reader.apply_append().unwrap(), RolloutUpdate::Changed);
         write!(file, "{}", event("task_complete", "one")).unwrap();
+        assert_eq!(reader.apply_append().unwrap(), RolloutUpdate::Changed);
+        let _ = fs::remove_file(path);
+    }
+
+    #[test]
+    fn one_append_publishes_lifecycle_and_all_metadata_together() {
+        let (path, mut reader) = reader("coalesced-metadata");
+        let mut file = fs::OpenOptions::new().append(true).open(&path).unwrap();
+        write!(file, "{}", event("task_started", "one")).unwrap();
+        assert_eq!(reader.apply_append().unwrap(), RolloutUpdate::Changed);
+        file.write_all(
+            br#"{"type":"event_msg","payload":{"type":"item_completed","item":{"type":"FileChange","changes":[{"path":"src/main.rs"}]}}}
+{"type":"event_msg","payload":{"type":"item_completed","item":{"type":"CommandExecution","command":"cargo test","status":"completed","exit_code":0,"aggregated_output":"test result: ok"}}}
+{"type":"event_msg","payload":{"type":"item_completed","item":{"type":"AgentMessage","phase":"final_answer","content":[{"type":"Text","text":"done"}]}}}
+"#,
+        )
+        .unwrap();
+        write!(file, "{}", event("task_complete", "one")).unwrap();
+
+        assert_eq!(reader.apply_append().unwrap(), RolloutUpdate::Changed);
+        assert_eq!(reader.readiness, Readiness::Ready);
+        assert_eq!(reader.latest_result.as_deref(), Some("done"));
+        assert_eq!(reader.changed_files, vec!["src/main.rs"]);
         assert_eq!(
-            reader.apply_append().unwrap(),
-            RolloutUpdate::Readiness(Readiness::Unknown)
+            reader
+                .verification
+                .as_ref()
+                .map(|evidence| evidence.command.as_str()),
+            Some("cargo test")
         );
         let _ = fs::remove_file(path);
     }

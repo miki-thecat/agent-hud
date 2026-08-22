@@ -24,21 +24,27 @@ pub struct VerificationEvidence {
 /// Extracts conservative, informational verification evidence from a completed
 /// command execution. This parser never produces or changes readiness state.
 pub fn parse_command_execution(record: &Value) -> Option<VerificationEvidence> {
-    let payload = record.get("payload")?;
-    if payload.get("type").and_then(Value::as_str) != Some("command_execution")
-        || payload.get("status").and_then(Value::as_str) != Some("completed")
-    {
+    // Current rollout evidence records completed commands as
+    // event_msg.item_completed with an item whose observed type is
+    // CommandExecution. Do not broaden this to synthetic response_item
+    // command shapes that are not present in the observed fixtures.
+    let item = record
+        .get("payload")
+        .filter(|payload| payload.get("type").and_then(Value::as_str) == Some("item_completed"))
+        .and_then(|payload| payload.get("item"))
+        .filter(|item| item.get("type").and_then(Value::as_str) == Some("CommandExecution"))?;
+    if item.get("status").and_then(Value::as_str) != Some("completed") {
         return None;
     }
 
-    let command = payload.get("command").and_then(Value::as_str)?.trim();
+    let command = item.get("command").and_then(Value::as_str)?.trim();
     let command_name = recognized_command(command)?;
     let output = ["stdout", "stderr", "aggregated_output"]
         .into_iter()
-        .filter_map(|key| payload.get(key).and_then(Value::as_str))
+        .filter_map(|key| item.get(key).and_then(Value::as_str))
         .collect::<Vec<_>>()
         .join("\n");
-    let exit_code = payload.get("exit_code").and_then(Value::as_i64);
+    let exit_code = item.get("exit_code").and_then(Value::as_i64);
 
     let outcome = if exit_code.is_some_and(|code| code != 0)
         || output.contains("test result: FAILED")
@@ -87,16 +93,16 @@ mod tests {
         exit_code: Option<i64>,
         output: &str,
     ) -> serde_json::Value {
-        let mut payload = json!({
-            "type": "command_execution",
+        let mut item = json!({
+            "type": "CommandExecution",
             "command": command,
             "status": status,
             "stdout": output,
         });
         if let Some(exit_code) = exit_code {
-            payload["exit_code"] = json!(exit_code);
+            item["exit_code"] = json!(exit_code);
         }
-        json!({"type": "response_item", "payload": payload})
+        json!({"type": "event_msg", "payload": {"type": "item_completed", "item": item}})
     }
 
     #[test]

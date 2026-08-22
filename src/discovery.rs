@@ -137,23 +137,40 @@ fn parse_rollout(candidate: Candidate) -> Result<SessionSnapshot, DiscoveryError
 /// Missing, partial, or non-final assistant messages are ignored.
 pub(crate) fn assistant_result(record: &Value) -> Option<String> {
     let payload = record.get("payload")?;
-    if payload.get("type").and_then(Value::as_str) != Some("message")
-        || payload.get("role").and_then(Value::as_str) != Some("assistant")
-    {
-        return None;
-    }
-    if let Some(phase) = payload.get("phase").and_then(Value::as_str)
-        && phase != "final_answer"
-    {
-        return None;
-    }
-    let content = payload.get("content")?.as_array()?;
+    let content = match payload.get("type").and_then(Value::as_str) {
+        // Observed current response_item shape for final assistant output.
+        Some("message")
+            if payload.get("role").and_then(Value::as_str) == Some("assistant")
+                && payload.get("phase").and_then(Value::as_str) == Some("final_answer") =>
+        {
+            payload.get("content")?.as_array()?
+        }
+        // Observed current event_msg item_completed shape for final output.
+        Some("item_completed")
+            if payload
+                .get("item")
+                .and_then(|item| item.get("type"))
+                .and_then(Value::as_str)
+                == Some("AgentMessage")
+                && payload
+                    .get("item")
+                    .and_then(|item| item.get("phase"))
+                    .and_then(Value::as_str)
+                    == Some("final_answer") =>
+        {
+            payload.get("item")?.get("content")?.as_array()?
+        }
+        _ => return None,
+    };
     let result = content
         .iter()
         .filter_map(|item| {
-            (item.get("type").and_then(Value::as_str) == Some("output_text"))
-                .then(|| item.get("text").and_then(Value::as_str))
-                .flatten()
+            (matches!(
+                item.get("type").and_then(Value::as_str),
+                Some("output_text") | Some("Text")
+            ))
+            .then(|| item.get("text").and_then(Value::as_str))
+            .flatten()
         })
         .collect::<Vec<_>>()
         .join("");
@@ -226,9 +243,6 @@ pub(crate) fn file_change_paths(record: &Value) -> Vec<String> {
     };
     let payload_type = payload.get("type").and_then(Value::as_str);
     let is_file_change_event = match (record.get("type").and_then(Value::as_str), payload_type) {
-        (Some("event_msg"), Some("patch_apply_end")) => {
-            payload.get("success").and_then(Value::as_bool) != Some(false)
-        }
         (Some("event_msg"), Some("item_completed")) => payload
             .get("item")
             .and_then(Value::as_object)
@@ -237,17 +251,12 @@ pub(crate) fn file_change_paths(record: &Value) -> Vec<String> {
             .is_some_and(|kind| {
                 kind.eq_ignore_ascii_case("filechange") || kind.eq_ignore_ascii_case("file_change")
             }),
-        (Some("response_item"), Some("file_change")) => true,
         _ => false,
     };
     if !is_file_change_event {
         return Vec::new();
     }
-    let changes = if payload_type == Some("item_completed") {
-        payload.get("item").and_then(|item| item.get("changes"))
-    } else {
-        payload.get("changes")
-    };
+    let changes = payload.get("item").and_then(|item| item.get("changes"));
     let Some(changes) = changes else {
         return Vec::new();
     };
@@ -438,6 +447,7 @@ mod tests {
             "payload": {
                 "type": "message",
                 "role": "assistant",
+                "phase": "final_answer",
                 "content": [
                     {"type": "output_text", "text": "Second"},
                     {"type": "output_text", "text": " result"}
@@ -545,16 +555,6 @@ mod tests {
                 }
             }
         });
-        let patch_apply_end = json!({
-            "type": "event_msg",
-            "payload": {
-                "type": "patch_apply_end",
-                "success": true,
-                "changes": {
-                    "src/main.rs": {"type": "update"}
-                }
-            }
-        });
         let raw_tool_call = json!({
             "type": "response_item",
             "payload": {"type": "custom_tool_call", "input": "*** Update File: ignored.rs"}
@@ -564,7 +564,6 @@ mod tests {
             file_change_paths(&item_completed),
             vec!["src/lib.rs", "README.md"]
         );
-        assert_eq!(file_change_paths(&patch_apply_end), vec!["src/main.rs"]);
         assert!(file_change_paths(&raw_tool_call).is_empty());
     }
 

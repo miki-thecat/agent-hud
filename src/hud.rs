@@ -268,17 +268,7 @@ fn draw(chain: &mut SwapChain, state: &ApplicationState) -> windows_canvas::Resu
             .as_deref()
             .filter(|title| !title.is_empty())
             .unwrap_or("(untitled)");
-        let verification_suffix = item
-            .verification
-            .as_ref()
-            .map(|evidence| format!(" · verify {}", evidence.outcome.as_str()))
-            .unwrap_or_default();
-        let files_suffix = if item.readiness == Readiness::Ready && !item.changed_files.is_empty() {
-            format!(" · files: {}", item.changed_files.join(", "))
-        } else {
-            String::new()
-        };
-        let title: String = format!("{title}{verification_suffix}{files_suffix}")
+        let title: String = title
             .chars()
             .map(|c| if c.is_control() { ' ' } else { c })
             .take(64)
