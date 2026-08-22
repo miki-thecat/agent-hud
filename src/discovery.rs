@@ -8,8 +8,10 @@ use rusqlite::{Connection, OpenFlags};
 use serde_json::Value;
 
 use crate::readiness::{LifecycleEvent, LifecycleKind, Readiness, reduce_lifecycle};
+use crate::verification::{VerificationEvidence, parse_command_execution};
 
 pub const RECENT_SESSION_LIMIT: usize = 20;
+pub const CHANGED_FILE_LIMIT: usize = 5;
 
 #[derive(Debug, Eq, PartialEq)]
 pub struct SessionSnapshot {
@@ -18,9 +20,12 @@ pub struct SessionSnapshot {
     pub cwd: Option<String>,
     pub project_label: Option<String>,
     pub readiness: Readiness,
+    pub latest_result: Option<String>,
     pub recency_at_ms: i64,
     pub lifecycle_timestamp: Option<String>,
+    pub changed_files: Vec<String>,
     pub rollout_path: PathBuf,
+    pub verification: Option<VerificationEvidence>,
 }
 
 struct Candidate {
@@ -88,12 +93,25 @@ fn parse_rollout(candidate: Candidate) -> Result<SessionSnapshot, DiscoveryError
 
     let mut events = Vec::new();
     let mut lifecycle_timestamp = None;
+    let mut verification = None;
+    let mut changed_files = Vec::new();
+    let mut latest_result = None;
     for line in lines {
         let line = line.map_err(DiscoveryError::Rollout)?;
+        if line.trim().is_empty() {
+            continue;
+        }
         let record: Value = serde_json::from_str(&line).map_err(DiscoveryError::Json)?;
         if let Some((kind, turn_id, timestamp)) = lifecycle_record(&record)? {
             events.push((kind, turn_id));
             lifecycle_timestamp = timestamp;
+        }
+        if let Some(evidence) = parse_command_execution(&record) {
+            verification = Some(evidence);
+        }
+        append_changed_files(&mut changed_files, file_change_paths(&record));
+        if let Some(result) = assistant_result(&record) {
+            latest_result = Some(result);
         }
     }
 
@@ -106,10 +124,57 @@ fn parse_rollout(candidate: Candidate) -> Result<SessionSnapshot, DiscoveryError
             kind: *kind,
             turn_id,
         })),
+        latest_result,
         recency_at_ms: candidate.recency_at_ms,
         lifecycle_timestamp,
+        changed_files,
         rollout_path: candidate.rollout_path,
+        verification,
     })
+}
+
+/// Extracts informational assistant output without contributing to readiness.
+/// Missing, partial, or non-final assistant messages are ignored.
+pub(crate) fn assistant_result(record: &Value) -> Option<String> {
+    let payload = record.get("payload")?;
+    let content = match payload.get("type").and_then(Value::as_str) {
+        // Observed current response_item shape for final assistant output.
+        Some("message")
+            if payload.get("role").and_then(Value::as_str) == Some("assistant")
+                && payload.get("phase").and_then(Value::as_str) == Some("final_answer") =>
+        {
+            payload.get("content")?.as_array()?
+        }
+        // Observed current event_msg item_completed shape for final output.
+        Some("item_completed")
+            if payload
+                .get("item")
+                .and_then(|item| item.get("type"))
+                .and_then(Value::as_str)
+                == Some("AgentMessage")
+                && payload
+                    .get("item")
+                    .and_then(|item| item.get("phase"))
+                    .and_then(Value::as_str)
+                    == Some("final_answer") =>
+        {
+            payload.get("item")?.get("content")?.as_array()?
+        }
+        _ => return None,
+    };
+    let result = content
+        .iter()
+        .filter_map(|item| {
+            (matches!(
+                item.get("type").and_then(Value::as_str),
+                Some("output_text") | Some("Text")
+            ))
+            .then(|| item.get("text").and_then(Value::as_str))
+            .flatten()
+        })
+        .collect::<Vec<_>>()
+        .join("");
+    (!result.trim().is_empty()).then_some(result)
 }
 
 pub fn project_label(cwd: Option<&str>) -> Option<String> {
@@ -172,6 +237,58 @@ pub(crate) fn lifecycle_record(
     )))
 }
 
+pub(crate) fn file_change_paths(record: &Value) -> Vec<String> {
+    let Some(payload) = record.get("payload") else {
+        return Vec::new();
+    };
+    let payload_type = payload.get("type").and_then(Value::as_str);
+    let is_file_change_event = match (record.get("type").and_then(Value::as_str), payload_type) {
+        (Some("event_msg"), Some("item_completed")) => payload
+            .get("item")
+            .and_then(Value::as_object)
+            .and_then(|item| item.get("type"))
+            .and_then(Value::as_str)
+            .is_some_and(|kind| {
+                kind.eq_ignore_ascii_case("filechange") || kind.eq_ignore_ascii_case("file_change")
+            }),
+        _ => false,
+    };
+    if !is_file_change_event {
+        return Vec::new();
+    }
+    let changes = payload.get("item").and_then(|item| item.get("changes"));
+    let Some(changes) = changes else {
+        return Vec::new();
+    };
+    match changes {
+        Value::Array(items) => items
+            .iter()
+            .filter_map(|item| item.get("path").and_then(Value::as_str))
+            .filter(|path| !path.trim().is_empty())
+            .map(str::to_owned)
+            .collect(),
+        Value::Object(items) => items
+            .keys()
+            .filter(|path| !path.trim().is_empty())
+            .cloned()
+            .collect(),
+        _ => Vec::new(),
+    }
+}
+
+pub(crate) fn append_changed_files(
+    files: &mut Vec<String>,
+    paths: impl IntoIterator<Item = String>,
+) {
+    for path in paths {
+        files.retain(|existing| existing != &path);
+        files.push(path);
+        if files.len() > CHANGED_FILE_LIMIT {
+            files.remove(0);
+        }
+    }
+}
+
 #[derive(Debug)]
 pub enum DiscoveryError {
     Database(rusqlite::Error),
@@ -203,8 +320,12 @@ mod tests {
 
     use rusqlite::Connection;
 
-    use super::{RECENT_SESSION_LIMIT, project_label, snapshot_from_paths};
+    use super::{
+        CHANGED_FILE_LIMIT, RECENT_SESSION_LIMIT, append_changed_files, assistant_result,
+        file_change_paths, project_label, snapshot_from_paths,
+    };
     use crate::readiness::Readiness;
+    use serde_json::json;
 
     fn workspace(name: &str) -> std::path::PathBuf {
         let path = std::env::temp_dir().join(format!("agent-hud-{name}-{}", std::process::id()));
@@ -301,8 +422,170 @@ mod tests {
 
         let snapshots = snapshot_from_paths(&database, RECENT_SESSION_LIMIT).unwrap();
         assert_eq!(snapshots[0].readiness, Readiness::Working);
+        assert_eq!(snapshots[0].latest_result, None);
         assert_eq!(snapshots[0].project_label.as_deref(), Some("agent-hud"));
         fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn extracts_latest_final_assistant_result_without_affecting_readiness() {
+        let root = workspace("assistant-result");
+        let database = root.join("state.sqlite");
+        let connection = setup_database(&database);
+        let path = root.join("rollout.jsonl");
+        let assistant = json!({
+            "type": "response_item",
+            "payload": {
+                "type": "message",
+                "role": "assistant",
+                "phase": "final_answer",
+                "content": [{"type": "output_text", "text": "First"}]
+            }
+        });
+        let latest = json!({
+            "type": "response_item",
+            "payload": {
+                "type": "message",
+                "role": "assistant",
+                "phase": "final_answer",
+                "content": [
+                    {"type": "output_text", "text": "Second"},
+                    {"type": "output_text", "text": " result"}
+                ]
+            }
+        });
+        fs::write(
+            &path,
+            format!(
+                "{}{}\n{}\n",
+                rollout(
+                    "root",
+                    &format!(
+                        "{}\n{}",
+                        event("task_started", "turn"),
+                        event("task_complete", "turn")
+                    ),
+                ),
+                assistant,
+                latest
+            ),
+        )
+        .unwrap();
+        insert(&connection, "root", &path, 10, "user");
+        drop(connection);
+
+        let snapshots = snapshot_from_paths(&database, RECENT_SESSION_LIMIT).unwrap();
+        assert_eq!(snapshots[0].readiness, Readiness::Ready);
+        assert_eq!(snapshots[0].latest_result.as_deref(), Some("Second result"));
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn malformed_or_non_final_assistant_results_are_ignored() {
+        assert_eq!(assistant_result(&json!({"type": "response_item"})), None);
+        assert_eq!(
+            assistant_result(&json!({
+                "type": "response_item",
+                "payload": {
+                    "type": "message",
+                    "role": "assistant",
+                    "phase": "commentary",
+                    "content": [{"type": "output_text", "text": "not final"}]
+                }
+            })),
+            None
+        );
+        assert_eq!(
+            assistant_result(&json!({
+                "type": "response_item",
+                "payload": {
+                    "type": "message",
+                    "role": "assistant",
+                    "content": [{"type": "output_text"}]
+                }
+            })),
+            None
+        );
+    }
+
+    #[test]
+    fn malformed_assistant_result_does_not_change_readiness() {
+        let root = workspace("malformed-assistant-result");
+        let database = root.join("state.sqlite");
+        let connection = setup_database(&database);
+        let path = root.join("rollout.jsonl");
+        let malformed_assistant = "{\"type\":\"response_item\",\"payload\":{\"type\":\"message\",\"role\":\"assistant\",\"content\":null}}";
+        fs::write(
+            &path,
+            format!(
+                "{}{}\n",
+                rollout(
+                    "root",
+                    &format!(
+                        "{}\n{}",
+                        event("task_started", "turn"),
+                        event("task_complete", "turn")
+                    ),
+                ),
+                malformed_assistant
+            ),
+        )
+        .unwrap();
+        insert(&connection, "root", &path, 10, "user");
+        drop(connection);
+
+        let snapshots = snapshot_from_paths(&database, RECENT_SESSION_LIMIT).unwrap();
+        assert_eq!(snapshots[0].readiness, Readiness::Ready);
+        assert_eq!(snapshots[0].latest_result, None);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn extracts_only_structured_file_change_events() {
+        let item_completed = json!({
+            "type": "event_msg",
+            "payload": {
+                "type": "item_completed",
+                "item": {
+                    "type": "FileChange",
+                    "changes": [
+                        {"path": "src/lib.rs", "kind": "update"},
+                        {"path": "README.md", "kind": "update"}
+                    ]
+                }
+            }
+        });
+        let raw_tool_call = json!({
+            "type": "response_item",
+            "payload": {"type": "custom_tool_call", "input": "*** Update File: ignored.rs"}
+        });
+
+        assert_eq!(
+            file_change_paths(&item_completed),
+            vec!["src/lib.rs", "README.md"]
+        );
+        assert!(file_change_paths(&raw_tool_call).is_empty());
+    }
+
+    #[test]
+    fn changed_file_summary_is_recent_bounded_and_deterministic() {
+        let mut files = Vec::new();
+        append_changed_files(
+            &mut files,
+            (0..=CHANGED_FILE_LIMIT).map(|index| format!("file-{index}.rs")),
+        );
+        append_changed_files(&mut files, ["file-3.rs".into()]);
+
+        assert_eq!(
+            files,
+            vec![
+                "file-1.rs",
+                "file-2.rs",
+                "file-4.rs",
+                "file-5.rs",
+                "file-3.rs"
+            ]
+        );
     }
 
     #[test]

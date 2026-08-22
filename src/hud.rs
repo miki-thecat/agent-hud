@@ -424,10 +424,13 @@ mod tests {
         SessionViewModel {
             id: id.into(),
             title: None,
+            latest_result: None,
             project_label: None,
+            changed_files: Vec::new(),
             readiness: Readiness::Ready,
             needs_attention: false,
             recency_at_ms,
+            verification: None,
         }
     }
 
