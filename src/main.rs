@@ -7,6 +7,7 @@ pub mod linking;
 mod metrics;
 mod model;
 mod project;
+pub mod queue;
 mod readiness;
 pub mod result_bundle;
 mod verification;
