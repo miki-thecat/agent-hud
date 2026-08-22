@@ -7,6 +7,7 @@ use std::{
 use rusqlite::{Connection, OpenFlags};
 use serde_json::Value;
 
+use crate::metrics::SessionMetrics;
 use crate::model::{WORKFLOW_EVENT_LIMIT, WorkflowEvent, WorkflowEventKind};
 use crate::project::ProjectIdentity;
 use crate::readiness::{LifecycleEvent, LifecycleKind, Readiness, reduce_lifecycle};
@@ -29,6 +30,7 @@ pub struct SessionSnapshot {
     pub rollout_path: PathBuf,
     pub verification: Option<VerificationEvidence>,
     pub workflow_events: Vec<WorkflowEvent>,
+    pub metrics: SessionMetrics,
 }
 
 struct Candidate {
@@ -124,6 +126,7 @@ fn parse_rollout(candidate: Candidate) -> Result<SessionSnapshot, DiscoveryError
         }
     }
 
+    let metrics = SessionMetrics::from_workflow_events(&workflow_events);
     Ok(SessionSnapshot {
         id: candidate.id,
         title: candidate.title.filter(|title| !title.trim().is_empty()),
@@ -140,6 +143,7 @@ fn parse_rollout(candidate: Candidate) -> Result<SessionSnapshot, DiscoveryError
         rollout_path: candidate.rollout_path,
         verification,
         workflow_events,
+        metrics,
     })
 }
 
