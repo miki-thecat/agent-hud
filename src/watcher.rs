@@ -416,6 +416,43 @@ mod tests {
         (root, watcher)
     }
 
+    fn setup_fixture_watcher(name: &str, contents: &str) -> (std::path::PathBuf, LiveWatcher) {
+        let root =
+            std::env::temp_dir().join(format!("agent-hud-restart-{name}-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(&root).unwrap();
+        let database = root.join("state_5.sqlite");
+        let rollout_path = root.join("rollout.jsonl");
+        let persisted = if name == "incomplete" {
+            contents.trim_end_matches('\n')
+        } else {
+            contents
+        };
+        fs::write(&rollout_path, persisted).unwrap();
+        let connection = Connection::open(&database).unwrap();
+        connection
+            .execute_batch(
+                "CREATE TABLE threads (
+                    id TEXT, title TEXT, cwd TEXT, rollout_path TEXT,
+                    recency_at_ms INTEGER, updated_at_ms INTEGER,
+                    thread_source TEXT, archived INTEGER
+                );",
+            )
+            .unwrap();
+        connection
+            .execute(
+                "INSERT INTO threads VALUES ('restart-root', 'Restart fixture', ?1, ?2, 42, 42, 'user', 0)",
+                (
+                    root.to_string_lossy().as_ref(),
+                    rollout_path.to_string_lossy().as_ref(),
+                ),
+            )
+            .unwrap();
+        drop(connection);
+        let watcher = LiveWatcher::new(database, root.join("sessions")).unwrap();
+        (root, watcher)
+    }
+
     fn metadata() -> String {
         "{\"type\":\"session_meta\",\"payload\":{\"id\":\"root\",\"session_id\":\"root\",\"thread_source\":\"user\"}}\n".into()
     }
@@ -590,5 +627,76 @@ mod tests {
             matches!(watcher.initial_changes().as_slice(), [SessionChange::Snapshot(items)] if items[0].readiness == Readiness::Unknown)
         );
         fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn restart_reconstructs_all_observable_fixture_state() {
+        let (root, first) = setup_fixture_watcher(
+            "complete",
+            include_str!("../tests/fixtures/restart-complete.jsonl"),
+        );
+        let first_snapshot = match first.initial_changes().as_slice() {
+            [SessionChange::Snapshot(items)] => items[0].clone(),
+            changes => panic!("unexpected initial changes: {changes:?}"),
+        };
+        assert_eq!(first_snapshot.readiness, Readiness::Ready);
+        assert_eq!(
+            first_snapshot
+                .project_identity
+                .as_ref()
+                .unwrap()
+                .normalized_name,
+            root.file_name().unwrap().to_string_lossy()
+        );
+        assert_eq!(
+            first_snapshot.latest_result.as_deref(),
+            Some("Restart reconstruction complete")
+        );
+        assert_eq!(first_snapshot.changed_files, ["src/main.rs", "README.md"]);
+        assert_eq!(
+            first_snapshot.verification.as_ref().unwrap().command,
+            "cargo test"
+        );
+        let first_timeline = first.tracked["restart-root"]
+            .rollout
+            .workflow_events()
+            .to_vec();
+        assert_eq!(first_timeline.len(), 5);
+
+        drop(first);
+        let database = root.join("state_5.sqlite");
+        let restarted = LiveWatcher::new(database, root.join("sessions")).unwrap();
+        let restarted_changes = restarted.initial_changes();
+        let restarted_snapshot = match restarted_changes.as_slice() {
+            [SessionChange::Snapshot(items)] => &items[0],
+            changes => panic!("unexpected restart changes: {changes:?}"),
+        };
+        assert_eq!(restarted_snapshot, &first_snapshot);
+        assert_eq!(
+            restarted.tracked["restart-root"].rollout.workflow_events(),
+            first_timeline
+        );
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn malformed_or_incomplete_persisted_evidence_is_not_reconstructed() {
+        for (name, fixture) in [
+            (
+                "malformed",
+                include_str!("../tests/fixtures/restart-malformed.jsonl"),
+            ),
+            (
+                "incomplete",
+                include_str!("../tests/fixtures/restart-incomplete.jsonl"),
+            ),
+        ] {
+            let (root, watcher) = setup_fixture_watcher(name, fixture);
+            assert!(matches!(
+                watcher.initial_changes().as_slice(),
+                [SessionChange::Snapshot(items)] if items.is_empty()
+            ));
+            fs::remove_dir_all(root).unwrap();
+        }
     }
 }

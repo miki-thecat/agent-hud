@@ -1,6 +1,6 @@
 use std::{
     fs::File,
-    io::{BufRead, BufReader},
+    io::{BufRead, BufReader, Read},
     path::{Path, PathBuf},
 };
 
@@ -85,7 +85,14 @@ fn read_candidates(
 }
 
 fn parse_rollout(candidate: Candidate) -> Result<SessionSnapshot, DiscoveryError> {
-    let file = File::open(&candidate.rollout_path).map_err(DiscoveryError::Rollout)?;
+    let mut file = File::open(&candidate.rollout_path).map_err(DiscoveryError::Rollout)?;
+    let mut contents = Vec::new();
+    file.read_to_end(&mut contents)
+        .map_err(DiscoveryError::Rollout)?;
+    if !contents.ends_with(b"\n") {
+        return Err(DiscoveryError::IncompleteRollout);
+    }
+    let file = std::io::Cursor::new(contents);
     let mut lines = BufReader::new(file).lines();
     let first = lines
         .next()
@@ -375,6 +382,7 @@ pub enum DiscoveryError {
     InvalidMetadata,
     IdentityMismatch,
     MalformedLifecycle,
+    IncompleteRollout,
 }
 
 impl std::fmt::Display for DiscoveryError {
@@ -386,6 +394,7 @@ impl std::fmt::Display for DiscoveryError {
             Self::InvalidMetadata => formatter.write_str("invalid rollout session metadata"),
             Self::IdentityMismatch => formatter.write_str("rollout identity mismatch"),
             Self::MalformedLifecycle => formatter.write_str("malformed lifecycle record"),
+            Self::IncompleteRollout => formatter.write_str("incomplete rollout record"),
         }
     }
 }

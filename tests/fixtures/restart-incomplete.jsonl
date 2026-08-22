@@ -1,0 +1,2 @@
+{"timestamp":"2026-08-22T00:00:00Z","type":"session_meta","payload":{"id":"restart-root","session_id":"restart-root","thread_source":"user"}}
+{"timestamp":"2026-08-22T00:00:01Z","type":"event_msg","payload":{"type":"task_started","turn_id":"turn-1"}}
