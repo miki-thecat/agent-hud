@@ -1,3 +1,4 @@
+pub mod attention;
 mod discovery;
 mod model;
 mod project;

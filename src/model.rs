@@ -1,5 +1,10 @@
 use crate::verification::VerificationEvidence;
-use crate::{discovery::SessionSnapshot, project::ProjectIdentity, readiness::Readiness};
+use crate::{
+    attention::{AttentionCenter, AttentionItem},
+    discovery::SessionSnapshot,
+    project::ProjectIdentity,
+    readiness::Readiness,
+};
 
 pub const WORKFLOW_EVENT_LIMIT: usize = 32;
 
@@ -62,6 +67,7 @@ pub enum SessionChange {
 pub struct ApplicationState {
     sessions: Vec<SessionViewModel>,
     pub observation_degraded: bool,
+    attention: AttentionCenter,
 }
 
 impl ApplicationState {
@@ -85,6 +91,16 @@ impl ApplicationState {
                 project.is_none_or(|project| session.project_identity.as_ref() == Some(project))
             })
             .collect()
+    }
+
+    #[allow(dead_code)]
+    pub fn attention(&self) -> &AttentionCenter {
+        &self.attention
+    }
+
+    #[allow(dead_code)]
+    pub fn replace_attention(&mut self, items: Vec<AttentionItem>) -> bool {
+        self.attention.replace(items)
     }
 
     pub fn apply(&mut self, change: SessionChange) -> bool {
@@ -133,7 +149,7 @@ impl ApplicationState {
             SessionChange::Removed(id) => {
                 let length = self.sessions.len();
                 self.sessions.retain(|item| item.id != id);
-                self.sessions.len() != length
+                self.attention.remove_session(&id) || self.sessions.len() != length
             }
             SessionChange::ObservationDegraded { id } => {
                 if let Some(item) = self.sessions.iter_mut().find(|item| item.id == id) {
@@ -185,7 +201,12 @@ fn session_ordering(left: &SessionViewModel, right: &SessionViewModel) -> std::c
 #[cfg(test)]
 mod tests {
     use super::{ApplicationState, SessionChange, SessionViewModel};
-    use crate::{discovery::SessionSnapshot, project::ProjectIdentity, readiness::Readiness};
+    use crate::{
+        attention::{AttentionCategory, AttentionItem},
+        discovery::SessionSnapshot,
+        project::ProjectIdentity,
+        readiness::Readiness,
+    };
     use std::path::PathBuf;
 
     fn session(id: &str, readiness: Readiness, recency_at_ms: i64) -> SessionViewModel {
@@ -482,5 +503,29 @@ mod tests {
                 .unwrap()
                 .needs_attention
         );
+    }
+
+    #[test]
+    fn attention_is_independent_from_readiness_and_removed_with_its_session() {
+        let mut state = ApplicationState::default();
+        state.apply(SessionChange::Snapshot(vec![session(
+            "a",
+            Readiness::Working,
+            1,
+        )]));
+        assert!(state.replace_attention(vec![AttentionItem {
+            id: "review-a".into(),
+            session_id: "a".into(),
+            category: AttentionCategory::ReviewRequired,
+            title: "Review required".into(),
+            detail: None,
+        }]));
+
+        state.apply(SessionChange::Updated(session("a", Readiness::Unknown, 1)));
+        assert_eq!(state.sessions()[0].readiness, Readiness::Unknown);
+        assert_eq!(state.attention().items().len(), 1);
+
+        assert!(state.apply(SessionChange::Removed("a".into())));
+        assert!(state.attention().items().is_empty());
     }
 }
