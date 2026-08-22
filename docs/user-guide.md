@@ -40,6 +40,24 @@ diagnostics; it remains read-only.
 For a faster development build, omit `--release` from either command. Cargo
 places the compiled binary in `target/release` or `target/debug`.
 
+## Optional local configuration
+
+Agent HUD optionally reads `.codex/agent-hud.json` from the current Windows
+user profile. The file is local-only and is not created automatically. The
+supported settings are window dimensions; omitted settings use these defaults:
+
+```json
+{
+  "window_width": 620,
+  "window_height": 720
+}
+```
+
+Window width must be between 320 and 3840 pixels, and height between 240 and
+2160 pixels. Invalid configuration is reported and ignored; the HUD falls
+back to its defaults. Unknown fields are ignored so the local format can grow
+without affecting older builds.
+
 ## Reading a session row
 
 The current readiness vocabulary is deliberately small:
