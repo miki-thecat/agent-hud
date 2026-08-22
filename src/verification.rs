@@ -33,12 +33,12 @@ pub fn parse_command_execution(record: &Value) -> Option<VerificationEvidence> {
         .filter(|payload| payload.get("type").and_then(Value::as_str) == Some("item_completed"))
         .and_then(|payload| payload.get("item"))
         .filter(|item| item.get("type").and_then(Value::as_str) == Some("CommandExecution"))?;
-    if item.get("status").and_then(Value::as_str) != Some("completed") {
+    let command = item.get("command").and_then(Value::as_array)?;
+    let command_name = recognized_command(command)?;
+    let status = item.get("status").and_then(Value::as_str)?;
+    if !matches!(status, "completed" | "failed") {
         return None;
     }
-
-    let command = item.get("command").and_then(Value::as_str)?.trim();
-    let command_name = recognized_command(command)?;
     let output = ["stdout", "stderr", "aggregated_output"]
         .into_iter()
         .filter_map(|key| item.get(key).and_then(Value::as_str))
@@ -46,7 +46,8 @@ pub fn parse_command_execution(record: &Value) -> Option<VerificationEvidence> {
         .join("\n");
     let exit_code = item.get("exit_code").and_then(Value::as_i64);
 
-    let outcome = if exit_code.is_some_and(|code| code != 0)
+    let outcome = if status == "failed"
+        || exit_code.is_some_and(|code| code != 0)
         || output.contains("test result: FAILED")
         || output.contains("error: could not compile")
     {
@@ -66,12 +67,39 @@ pub fn parse_command_execution(record: &Value) -> Option<VerificationEvidence> {
     })
 }
 
-fn recognized_command(command: &str) -> Option<&'static str> {
-    let mut words = command.split_whitespace();
-    if words.next()?.rsplit(['/', '\\']).next()? != "cargo" {
+fn recognized_command(argv: &[Value]) -> Option<&'static str> {
+    let argv = argv.iter().map(Value::as_str).collect::<Option<Vec<_>>>()?;
+    let mut words = if is_shell_wrapper(&argv) {
+        argv[2..]
+            .iter()
+            .flat_map(|arg| arg.split_whitespace())
+            .collect::<Vec<_>>()
+    } else if argv.first()?.rsplit(['/', '\\']).next()? == "cargo" {
+        argv
+    } else {
+        return None;
+    };
+    let cargo_positions = words
+        .iter()
+        .enumerate()
+        .filter(|(_, word)| {
+            word.trim_matches(['\'', '"']).rsplit(['/', '\\']).next() == Some("cargo")
+        })
+        .map(|(index, _)| index)
+        .collect::<Vec<_>>();
+    if cargo_positions.len() != 1 {
         return None;
     }
-    match words.next()? {
+    words = words.split_off(cargo_positions[0]);
+    if words
+        .iter()
+        .any(|word| matches!(*word, ";" | "&&" | "||" | "|"))
+    {
+        return None;
+    }
+    let mut words = words.into_iter();
+    words.next()?;
+    match words.next()?.trim_matches(['\'', '"']) {
         "test" => Some("cargo test"),
         "check" => Some("cargo check"),
         "clippy" => Some("cargo clippy"),
@@ -81,14 +109,23 @@ fn recognized_command(command: &str) -> Option<&'static str> {
     }
 }
 
+fn is_shell_wrapper(argv: &[&str]) -> bool {
+    argv.len() >= 3
+        && matches!(
+            argv[0].rsplit(['/', '\\']).next(),
+            Some("powershell.exe" | "pwsh.exe" | "cmd.exe" | "powershell" | "pwsh" | "cmd")
+        )
+        && matches!(argv[1], "-Command" | "-c" | "/c")
+}
+
 #[cfg(test)]
 mod tests {
-    use serde_json::json;
+    use serde_json::{Value, json};
 
     use super::{VerificationEvidence, VerificationOutcome, parse_command_execution};
 
     fn command(
-        command: &str,
+        command: Value,
         status: &str,
         exit_code: Option<i64>,
         output: &str,
@@ -108,7 +145,12 @@ mod tests {
     #[test]
     fn recognizes_successful_cargo_test_by_exit_code() {
         assert_eq!(
-            parse_command_execution(&command("cargo test --all", "completed", Some(0), "")),
+            parse_command_execution(&command(
+                json!(["cargo", "test", "--all"]),
+                "completed",
+                Some(0),
+                ""
+            )),
             Some(VerificationEvidence {
                 command: "cargo test".into(),
                 outcome: VerificationOutcome::Passed,
@@ -119,7 +161,7 @@ mod tests {
     #[test]
     fn recognizes_successful_output_without_exit_code() {
         let record = command(
-            "cargo test",
+            json!(["cargo", "test"]),
             "completed",
             None,
             "test result: ok. 3 passed; 0 failed",
@@ -133,9 +175,14 @@ mod tests {
     #[test]
     fn recognizes_failed_exit_code() {
         assert_eq!(
-            parse_command_execution(&command("cargo check", "completed", Some(101), ""))
-                .unwrap()
-                .outcome,
+            parse_command_execution(&command(
+                json!(["cargo", "check"]),
+                "completed",
+                Some(101),
+                ""
+            ))
+            .unwrap()
+            .outcome,
             VerificationOutcome::Failed
         );
     }
@@ -143,7 +190,12 @@ mod tests {
     #[test]
     fn ignores_running_commands() {
         assert_eq!(
-            parse_command_execution(&command("cargo test", "in_progress", Some(0), "")),
+            parse_command_execution(&command(
+                json!(["cargo", "test"]),
+                "in_progress",
+                Some(0),
+                ""
+            )),
             None
         );
     }
@@ -151,7 +203,7 @@ mod tests {
     #[test]
     fn ignores_unrecognized_commands() {
         assert_eq!(
-            parse_command_execution(&command("npm test", "completed", Some(0), "")),
+            parse_command_execution(&command(json!(["npm", "test"]), "completed", Some(0), "")),
             None
         );
     }
@@ -160,7 +212,7 @@ mod tests {
     fn ignores_ambiguous_completed_output() {
         assert_eq!(
             parse_command_execution(&command(
-                "cargo check",
+                json!(["cargo", "check"]),
                 "completed",
                 None,
                 "Checking agent-hud"
@@ -175,6 +227,61 @@ mod tests {
             parse_command_execution(
                 &json!({"type":"event_msg","payload":{"type":"task_complete"}})
             ),
+            None
+        );
+    }
+
+    #[test]
+    fn recognizes_current_windows_shell_argv() {
+        let record = command(
+            json!([
+                "C:/Windows/System32/WindowsPowerShell/v1.0/powershell.exe",
+                "-Command",
+                "cargo test --all"
+            ]),
+            "completed",
+            Some(0),
+            "",
+        );
+        assert_eq!(
+            parse_command_execution(&record).unwrap().outcome,
+            VerificationOutcome::Passed
+        );
+    }
+
+    #[test]
+    fn explicit_failed_status_is_failed_evidence() {
+        assert_eq!(
+            parse_command_execution(&command(json!(["cargo", "test"]), "failed", None, ""))
+                .unwrap()
+                .outcome,
+            VerificationOutcome::Failed
+        );
+    }
+
+    #[test]
+    fn declined_and_in_progress_are_not_evidence() {
+        for status in ["declined", "in_progress"] {
+            assert_eq!(
+                parse_command_execution(&command(json!(["cargo", "test"]), status, None, "")),
+                None
+            );
+        }
+    }
+
+    #[test]
+    fn rejects_string_and_ambiguous_commands() {
+        assert_eq!(
+            parse_command_execution(&command(json!("cargo test"), "completed", Some(0), "")),
+            None
+        );
+        assert_eq!(
+            parse_command_execution(&command(
+                json!(["cargo", "test", ";", "cargo", "check"]),
+                "completed",
+                Some(0),
+                ""
+            )),
             None
         );
     }

@@ -472,7 +472,7 @@ mod tests {
         assert_eq!(reader.apply_append().unwrap(), RolloutUpdate::Changed);
         file.write_all(
             br#"{"type":"event_msg","payload":{"type":"item_completed","item":{"type":"FileChange","changes":[{"path":"src/main.rs"}]}}}
-{"type":"event_msg","payload":{"type":"item_completed","item":{"type":"CommandExecution","command":"cargo test","status":"completed","exit_code":0,"aggregated_output":"test result: ok"}}}
+{"type":"event_msg","payload":{"type":"item_completed","item":{"type":"CommandExecution","command":["cargo","test"],"status":"completed","exit_code":0,"aggregated_output":"test result: ok"}}}
 {"type":"event_msg","payload":{"type":"item_completed","item":{"type":"AgentMessage","phase":"final_answer","content":[{"type":"Text","text":"done"}]}}}
 "#,
         )
