@@ -6,6 +6,7 @@ mod model;
 mod project;
 mod readiness;
 pub mod result_bundle;
+pub mod review;
 mod verification;
 mod watcher;
 
