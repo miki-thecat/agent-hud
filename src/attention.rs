@@ -5,6 +5,7 @@
 //! more attention items.
 
 use std::cmp::Ordering;
+use std::collections::HashSet;
 
 #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
 pub enum AttentionCategory {
@@ -57,6 +58,14 @@ impl AttentionCenter {
     pub fn remove_session(&mut self, session_id: &str) -> bool {
         let before = self.items.len();
         self.items.retain(|item| item.session_id != session_id);
+        before != self.items.len()
+    }
+
+    pub fn retain_sessions(&mut self, session_ids: impl IntoIterator<Item = String>) -> bool {
+        let session_ids = session_ids.into_iter().collect::<HashSet<_>>();
+        let before = self.items.len();
+        self.items
+            .retain(|item| session_ids.contains(&item.session_id));
         before != self.items.len()
     }
 }

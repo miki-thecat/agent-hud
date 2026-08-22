@@ -120,6 +120,8 @@ impl ApplicationState {
                     }
                 }
                 items.sort_by(session_ordering);
+                self.attention
+                    .retain_sessions(items.iter().map(|item| item.id.clone()));
                 self.sessions = items;
                 true
             }
@@ -527,5 +529,47 @@ mod tests {
 
         assert!(state.apply(SessionChange::Removed("a".into())));
         assert!(state.attention().items().is_empty());
+    }
+
+    #[test]
+    fn snapshot_disappearance_removes_stale_attention_only_for_missing_sessions() {
+        let mut state = ApplicationState::default();
+        state.apply(SessionChange::Snapshot(vec![
+            session("a", Readiness::Working, 2),
+            session("b", Readiness::Ready, 1),
+        ]));
+        state.replace_attention(vec![
+            AttentionItem {
+                id: "review-a".into(),
+                session_id: "a".into(),
+                category: AttentionCategory::ReviewRequired,
+                title: "Review A".into(),
+                detail: None,
+            },
+            AttentionItem {
+                id: "review-b".into(),
+                session_id: "b".into(),
+                category: AttentionCategory::ReviewRequired,
+                title: "Review B".into(),
+                detail: None,
+            },
+        ]);
+
+        assert!(state.apply(SessionChange::Snapshot(vec![session(
+            "b",
+            Readiness::Ready,
+            1,
+        )])));
+
+        assert_eq!(
+            state
+                .attention()
+                .items()
+                .iter()
+                .map(|item| item.session_id.as_str())
+                .collect::<Vec<_>>(),
+            ["b"]
+        );
+        assert_eq!(state.sessions()[0].readiness, Readiness::Ready);
     }
 }
