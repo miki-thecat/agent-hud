@@ -99,7 +99,9 @@ impl ProcessObserver {
 mod platform {
     use super::{ProcessHealth, ProcessInfo};
     use std::mem::size_of;
-    use windows_sys::Win32::Foundation::{CloseHandle, INVALID_HANDLE_VALUE};
+    use windows_sys::Win32::Foundation::{
+        CloseHandle, ERROR_NO_MORE_FILES, GetLastError, INVALID_HANDLE_VALUE,
+    };
     use windows_sys::Win32::System::Diagnostics::ToolHelp::{
         CreateToolhelp32Snapshot, PROCESSENTRY32W, Process32FirstW, Process32NextW,
         TH32CS_SNAPPROCESS,
@@ -122,6 +124,7 @@ mod platform {
         }
 
         let mut processes = Vec::new();
+        let mut evidence = super::Evidence::Available;
         loop {
             let executable = wide_name(&entry.szExeFile);
             if names
@@ -135,13 +138,17 @@ mod platform {
             }
             if unsafe { Process32NextW(snapshot, &mut entry) } == 0 {
                 // Toolhelp uses a zero return for both end-of-snapshot and an
-                // enumeration error. The snapshot remains useful either way;
-                // keep the conservative distinction out of the public API.
+                // enumeration error. Preserve the records already observed,
+                // but report degraded evidence when the error is not the
+                // normal end-of-snapshot condition.
+                if unsafe { GetLastError() } != ERROR_NO_MORE_FILES {
+                    evidence = super::Evidence::Degraded;
+                }
                 break;
             }
         }
         unsafe { CloseHandle(snapshot) };
-        ProcessHealth::from_snapshot(super::Evidence::Available, processes)
+        ProcessHealth::from_snapshot(evidence, processes)
     }
 
     fn wide_name(value: &[u16]) -> String {
