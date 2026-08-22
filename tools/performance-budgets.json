@@ -1,0 +1,23 @@
+{
+  "version": 1,
+  "units": {
+    "startup_ms": "milliseconds from process launch until the native window handle is visible; this is a proxy, not first paint",
+    "settled_working_set_mb": "MiB after the settle interval",
+    "peak_working_set_mb": "MiB during the sample",
+    "idle_cpu_ms": "CPU milliseconds consumed during the idle sample",
+    "event_to_visible_ms": "milliseconds from an observed state event to visible UI update; requires an instrumented trace"
+  },
+  "targets": {
+    "startup_ms": 150,
+    "settled_working_set_mb": 20,
+    "idle_cpu_ms": 100,
+    "event_to_visible_ms": 50
+  },
+  "regression_ceilings": {
+    "startup_ms": 1200,
+    "settled_working_set_mb": 100,
+    "peak_working_set_mb": 110,
+    "idle_cpu_ms": 2000,
+    "event_to_visible_ms": 100
+  }
+}
