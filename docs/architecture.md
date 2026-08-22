@@ -65,6 +65,28 @@ The current discovery result is a bounded **Recent local sessions** catalog,
 not proof of currently open Desktop chats. That distinction is part of the
 product contract and must remain visible in new UI or documentation.
 
+## Internal extension contracts
+
+Issue #70 defines lightweight internal extension points without introducing a
+plugin runtime. The contracts live in `src/extensions.rs` and are deliberately
+provider-neutral:
+
+- `SessionObserver` delivers normalized `SessionChange` values through a
+  blocking `next_event` method. A provider may wait on its own event source;
+  the contract does not impose polling or an async runtime. It can report
+  disconnection and termination without fabricating session state.
+- `PresentationContributor` receives only a `SessionViewModel` and may return
+  one bounded, already-formatted contribution. It cannot parse raw protocol
+  records or mutate application state.
+- `ExplicitAction` exposes a descriptor and accepts an explicit,
+  session-scoped `ActionRequest`. Actions are not invoked by observation and
+  are not registered by the MVP, which remains read-only.
+
+These are compile-time interfaces, not dynamic loading boundaries. There is
+no DLL loading, scripting runtime, marketplace, or provider registry. Any
+future wiring must preserve the existing adapter/reducer/UI separation and
+must opt into each capability explicitly.
+
 ## Current technology decision
 
 Windows-first candidate stack:
