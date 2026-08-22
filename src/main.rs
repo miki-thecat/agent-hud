@@ -1,4 +1,5 @@
 pub mod attention;
+pub mod dependency_graph;
 mod discovery;
 pub mod extensions;
 mod metrics;
