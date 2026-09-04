@@ -7,6 +7,7 @@ pub mod extensions;
 pub mod linking;
 mod metrics;
 mod model;
+pub mod process_health;
 mod project;
 pub mod queue;
 mod readiness;
